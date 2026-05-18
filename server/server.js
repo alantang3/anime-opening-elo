@@ -561,11 +561,9 @@ function beginRematch(match) {
     }, 1200 + Math.random() * 2500);
   }
   match.timers.rematch = setTimeout(() => {
-    // Treat no-decision as "no". Bot matches don't re-queue (back to lobby).
-    dissolveMatch(match, {
-      requeue: !match.bot,
-      reason: "rematch_timeout",
-    });
+    // Nobody decided in time → end the match but keep each connected player
+    // on the result screen; they re-queue when they choose to.
+    parkAfterOpponentGone(match, "rematch_timeout", match.members.slice());
   }, REMATCH_TIMEOUT_MS);
 }
 
@@ -584,7 +582,21 @@ function onRematchVote(match, conn, yes) {
   match.rematchVotes.set(conn.socket.id, !!yes);
 
   if (!yes) {
-    dissolveMatch(match, { requeue: !match.bot, reason: "declined" });
+    const other = match.members.find((c) => c !== conn);
+    clearTimers(match);
+    matches.delete(match.id);
+    // The decliner explicitly asked for a new opponent → honour that:
+    // requeue them (PvP) or back to lobby (vs a bot).
+    if (!conn.isBot) {
+      conn.socket.leave(match.id);
+      conn.matchId = null;
+      conn.status = "idle";
+      conn.socket.emit("match:over", { reason: "declined" });
+      if (!match.bot) enqueue(conn.socket.id);
+    }
+    // The other player didn't choose to leave → keep them parked on the
+    // result screen with a manual "Find new opponent" button.
+    parkAfterOpponentGone(match, "opponent_declined", [other]);
     return;
   }
   emitRematchState(match);
@@ -620,6 +632,25 @@ function dissolveMatch(match, { requeue = false, reason } = {}, leaverId) {
   }
 }
 
+// The opponent is gone (real disconnect, declined the rematch, or the rematch
+// timed out) but THIS player is still connected. Don't yank them off the
+// result screen: tear the match down once and leave each surviving human
+// idle but NOT requeued. The client keeps the revealed opening playable and
+// shows a "Find new opponent" button — they re-queue only when they choose.
+function parkAfterOpponentGone(match, reason, survivors) {
+  if (matches.has(match.id)) {
+    clearTimers(match);
+    matches.delete(match.id);
+  }
+  for (const c of survivors) {
+    if (!c || c.isBot) continue;
+    c.socket.leave(match.id);
+    c.matchId = null;
+    c.status = "idle";
+    c.socket.emit("opponent:gone", { reason });
+  }
+}
+
 // A disconnect mid-play is a forfeit: the remaining player wins that round.
 function handleDisconnectDuringMatch(match, goneConn) {
   const other = match.members.find((c) => c !== goneConn);
@@ -632,32 +663,44 @@ function handleDisconnectDuringMatch(match, goneConn) {
     match.disconnectForfeit = true;
     // Force the round end window into a state settleWin accepts.
     match.state = "playing";
-    settleWin(match, other);
-    // After the forfeit result, the survivor goes back to the queue.
-    other.socket.emit("opponent:left", { forfeited: true });
-    finalizeAfterForfeit(match, other);
+    settleWin(match, other); // survivor wins this round and sees the result
+    // ...and stays parked on that result (opening still playable) instead of
+    // being thrown back into the queue. settleWin started a rematch
+    // handshake; parkAfterOpponentGone tears it back down.
+    parkAfterOpponentGone(match, "opponent_disconnected", [other]);
     return;
   }
 
-  // Disconnect while preparing / showing result / voting: no Elo change.
+  // Disconnect with a result already on screen (showing result / voting):
+  // keep the survivor on it, no Elo change, no auto-requeue.
+  if (match.state === "result" || match.state === "rematch") {
+    parkAfterOpponentGone(match, "opponent_left", [other]);
+    return;
+  }
+
+  // Disconnect while still preparing (nothing to watch yet): drop the
+  // survivor to the lobby — no auto-requeue, they re-queue when ready.
   clearTimers(match);
   matches.delete(match.id);
   other.socket.leave(match.id);
   other.matchId = null;
   other.status = "idle";
-  other.socket.emit("opponent:left", { forfeited: false });
-  enqueue(other.socket.id);
+  other.socket.emit("match:over", { reason: "opponent_left" });
 }
 
-function finalizeAfterForfeit(match, survivor) {
-  // settleWin set state=result and started a rematch; tear that down since
-  // the opponent is gone, and requeue the survivor.
-  clearTimers(match);
-  matches.delete(match.id);
-  survivor.socket.leave(match.id);
-  survivor.matchId = null;
-  survivor.status = "idle";
-  enqueue(survivor.socket.id);
+// A voluntary mid-round forfeit (the "Forfeit"/leave button). Unlike a real
+// disconnect, the player is still connected, so we do NOT tear the match
+// down: the forfeiter just loses THIS round (opponent wins it, forfeit Elo
+// applies), then both players enter the normal rematch handshake — so they
+// can choose to play each other again.
+function voluntaryForfeit(match, leaverConn) {
+  if (!matches.has(match.id)) return;
+  if (match.state !== "playing" && match.state !== "countdown") return;
+  const winner = match.members.find((c) => c !== leaverConn);
+  if (!winner) return;
+  match.disconnectForfeit = true; // result reads "You forfeited" / "…you win"
+  match.state = "playing";        // shape the window settleWin expects
+  settleWin(match, winner);       // applies Elo, emits round:end, beginRematch
 }
 
 // ---------- Bot opponent ----------
@@ -910,11 +953,21 @@ io.on("connection", (socket) => {
     const m = c?.matchId && matches.get(c.matchId);
     if (!m) return;
     if (m.state === "playing" || m.state === "countdown") {
-      // Leaving mid-play forfeits, same as a disconnect.
-      handleDisconnectDuringMatch(m, c);
+      // Leaving mid-play forfeits the round — but, unlike a real disconnect,
+      // the match stays alive so both can still rematch each other.
+      voluntaryForfeit(m, c);
     } else {
-      dissolveMatch(m, { requeue: true, reason: "left" }, socket.id);
+      // Leaving from the result/vote screen: the leaver goes back to the
+      // lobby; the other player stays parked on the result (their choice
+      // when to re-queue).
+      const other = m.members.find((x) => x !== c);
+      clearTimers(m);
+      matches.delete(m.id);
+      c.socket.leave(m.id);
+      c.matchId = null;
+      c.status = "idle";
       c.socket.emit("match:over", { reason: "you_left" });
+      parkAfterOpponentGone(m, "opponent_left", [other]);
     }
   });
 

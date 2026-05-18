@@ -57,6 +57,9 @@ export default function App() {
   const [oppStatus, setOppStatus] = useState(null);
   const [result, setResult] = useState(null);
   const [votes, setVotes] = useState({ you: null, opponent: null });
+  // Opponent gone (disconnect/declined/timeout): stay on the result screen
+  // with the opening replayable until the player chooses to re-queue.
+  const [oppGone, setOppGone] = useState(false);
   const [notice, setNotice] = useState(null);
   const [board, setBoard] = useState([]);
   const [inviteCode, setInviteCode] = useState(null);
@@ -145,6 +148,7 @@ export default function App() {
       setPhase(PHASE.QUEUE);
       setNotice(null);
       setResult(null);
+      setOppGone(false);
     });
     socket.on("queueCancelled", () => setPhase(PHASE.LOBBY));
 
@@ -154,6 +158,7 @@ export default function App() {
       politeRef.current = !!polite;
       setResult(null);
       setVotes({ you: null, opponent: null });
+      setOppGone(false);
       setFeedback(null);
       setOppStatus(null);
       setNotice(null);
@@ -166,6 +171,7 @@ export default function App() {
     socket.on("round:prepare", ({ round, videoUrl, dub }) => {
       setResult(null);
       setVotes({ you: null, opponent: null });
+      setOppGone(false);
       setFeedback(null);
       setOppStatus(null);
       setQuery("");
@@ -209,6 +215,7 @@ export default function App() {
       setResult(data);
       setPhase(PHASE.RESULT);
       setVotes({ you: null, opponent: null });
+      setOppGone(false);
       refreshBoard();
       // Rank-up reveal: did this result push us into a higher tier?
       const before = data?.result?.eloBefore;
@@ -230,12 +237,18 @@ export default function App() {
       setPhase(PHASE.PREPARE);
     });
 
-    socket.on("opponent:left", ({ forfeited }) => {
+    // Opponent is gone — keep the player on the result screen until they
+    // pick "Find new opponent" themselves (no auto-requeue).
+    socket.on("opponent:gone", ({ reason }) => {
       teardownRTC();
+      setVotes({ you: null, opponent: null });
+      setOppGone(true);
       setNotice(
-        forfeited
-          ? "Opponent left mid-round — you win this one. Finding a new opponent…"
-          : "Opponent left. Finding a new opponent…"
+        reason === "opponent_declined"
+          ? "Opponent wanted a new opponent."
+          : reason === "rematch_timeout"
+          ? "Rematch timed out."
+          : "Opponent left."
       );
     });
     socket.on("match:over", ({ reason }) => {
@@ -1188,6 +1201,8 @@ export default function App() {
                 votes={votes}
                 opponent={opponent}
                 onVote={vote}
+                oppGone={oppGone}
+                onRequeue={findMatch}
               />
             )}
           </>
@@ -1225,7 +1240,7 @@ export default function App() {
   );
 }
 
-function ResultPanel({ result, votes, opponent, onVote }) {
+function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue }) {
   const r = result.result || {};
   const won = r.youWon;
   const cls =
@@ -1287,32 +1302,41 @@ function ResultPanel({ result, votes, opponent, onVote }) {
           : ""}
       </div>
 
-      <div className="rematch">
-        <div className="rematch-q">Play {opponent?.nickname} again?</div>
-        <div className="vote-state">
-          You: <b>{votes.you == null ? "—" : votes.you ? "Yes" : "No"}</b>
-          {"   "}Opponent:{" "}
-          <b>
-            {votes.opponent == null
-              ? "waiting…"
-              : votes.opponent
-              ? "Yes"
-              : "No"}
-          </b>
+      {oppGone ? (
+        <div className="rematch">
+          <div className="rematch-q">Opponent left — match over.</div>
+          <div className="button-row">
+            <button onClick={onRequeue}>Find new opponent</button>
+          </div>
         </div>
-        <div className="button-row">
-          <button onClick={() => onVote(true)} disabled={votes.you != null}>
-            {votes.you === true ? "Waiting for opponent…" : "Yes, rematch"}
-          </button>
-          <button
-            className="danger"
-            onClick={() => onVote(false)}
-            disabled={votes.you != null}
-          >
-            No, new opponent
-          </button>
+      ) : (
+        <div className="rematch">
+          <div className="rematch-q">Play {opponent?.nickname} again?</div>
+          <div className="vote-state">
+            You: <b>{votes.you == null ? "—" : votes.you ? "Yes" : "No"}</b>
+            {"   "}Opponent:{" "}
+            <b>
+              {votes.opponent == null
+                ? "waiting…"
+                : votes.opponent
+                ? "Yes"
+                : "No"}
+            </b>
+          </div>
+          <div className="button-row">
+            <button onClick={() => onVote(true)} disabled={votes.you != null}>
+              {votes.you === true ? "Waiting for opponent…" : "Yes, rematch"}
+            </button>
+            <button
+              className="danger"
+              onClick={() => onVote(false)}
+              disabled={votes.you != null}
+            >
+              No, new opponent
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
