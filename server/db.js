@@ -114,12 +114,16 @@ db.exec(
 );
 
 // One-time opt-in reset: set RESET_ELO=1 to wipe every existing account's
-// rating/record back to the floor (then remove the env var). Useful after
-// changing the starting Elo so old test accounts aren't stuck at 1200.
+// rating/record back to the floor (then remove the env var). Useful after a
+// tuning change so old accounts aren't stuck on ratings from the old system.
+// peak_elo is reset too — otherwise it keeps the old high (it only ratchets
+// up via MAX(...) on save) and the profile still shows the original peak.
 if (process.env.RESET_ELO === "1") {
   const n = db
     .prepare(
-      `UPDATE players SET elo = ${DEFAULT_ELO}, wins = 0, losses = 0, draws = 0`
+      `UPDATE players
+          SET elo = ${DEFAULT_ELO}, peak_elo = ${DEFAULT_ELO},
+              wins = 0, losses = 0, draws = 0`
     )
     .run().changes;
   console.log(`RESET_ELO: reset ${n} player(s) to ${DEFAULT_ELO} Elo`);

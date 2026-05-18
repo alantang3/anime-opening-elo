@@ -139,11 +139,10 @@ export async function getPopularity(malId) {
 
 // Difficulty targeting. Everyone starts at 100 Elo (the floor), so the curve
 // is calibrated to that base: at/near 100 you get mainstream, household-name
-// shows; difficulty ramps up as you climb, and only strong players reach the
-// obscure deep cuts.
-// Thresholds are scaled to the big-K Elo system (~+45 avg per win), so the
-// ramp is paced by GAMES PLAYED, not raw rating. 100 → ~4000 ≈ a long career
-// of dozens of wins before you're seeing the truly obscure deep cuts.
+// shows; difficulty ramps up as raw Elo climbs toward HARD_ELO, and only
+// strong players reach the obscure deep cuts. The ramp is a function of the
+// player pair's average Elo rating (not games played) — wins push that rating
+// up faster than losses pull it down (see elo.js), so the climb is gentle.
 const EASY_ELO = 100; // start / floor → most popular
 const HARD_ELO = 4000; // at/above this → most obscure
 const MIN_TARGET = 0.05;
@@ -155,19 +154,28 @@ export function targetFactorForElo(avgElo) {
   return clamp(MIN_TARGET + t * (MAX_TARGET - MIN_TARGET), 0.05, 0.95);
 }
 
-// A HARD minimum MAL member count that decreases linearly with Elo. The top
-// ~500 shows already have >500k members and include plenty a casual wouldn't
-// know, so Elo 100 requires ~1M+ (strictly the shows "everyone" knows). The
-// bar eases as Elo rises and only reaches 0 at FLOOR_FADES_BY, which is set
-// equal to HARD_ELO (4000) so even Elo 3000 still has a real threshold
-// (~256k members) before deep cuts unlock at the very top.
-const MAINSTREAM_MEMBERS = 1_000_000; // floor at Elo 100 (truly ubiquitous)
-const FLOOR_FADES_BY = 4000; // Elo at which the members floor reaches 0
+// A HARD minimum MAL member count as an explicit function of the pair's
+// average Elo. Modeled as an exponential decay with a fixed HALF-LIFE in Elo
+// points: starting from MEMBERS_HI at Elo 100, the required member count
+// halves every HALF_LIFE_ELO of rating, asymptoting toward MEMBERS_LO (≈ no
+// floor). This is the single knob for difficulty pacing — a bigger half-life
+// keeps players on popular shows for longer (slower ramp); smaller is faster.
+//
+//   minMembers = clamp( MEMBERS_HI · 2 ^ (−(avgElo − EASY_ELO) / HALF_LIFE_ELO),
+//                        MEMBERS_LO, MEMBERS_HI )
+//
+// Resulting curve (members floor → ~count of qualifying shows):
+//   Elo  100 → 3.50M (~4)    500 → 2.20M (~30)   1500 → 0.69M (~270)
+//        300 → 2.78M (~12)  1000 → 1.24M (~110)  2000 → 0.39M (~480)
+//       3000 → 123k         4000 → 39k (deep cuts open up at the very top)
+const MEMBERS_HI = 3_500_000; // floor at EASY_ELO (Elo 100): the ubiquitous few
+const MEMBERS_LO = 1_000;     // asymptotic floor: effectively no floor
+const HALF_LIFE_ELO = 600;    // Elo per halving of the required member count
 
 export function minMembersForElo(avgElo) {
   const e = Number.isFinite(avgElo) ? avgElo : EASY_ELO;
-  const t = clamp((e - EASY_ELO) / (FLOOR_FADES_BY - EASY_ELO), 0, 1);
-  return Math.round(MAINSTREAM_MEMBERS * (1 - t));
+  const m = MEMBERS_HI * Math.pow(2, -(e - EASY_ELO) / HALF_LIFE_ELO);
+  return Math.round(clamp(m, MEMBERS_LO, MEMBERS_HI));
 }
 
 export { membersToFactor };

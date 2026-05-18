@@ -50,7 +50,7 @@ const DURATION_FALLBACK_MS = 90_000; // used if neither client reports in time
 const DURATION_REPORT_WAIT_MS = 8_000;
 const REMATCH_TIMEOUT_MS = 25_000;
 // No human opponent within this long in the random queue → play a bot.
-const BOT_WAIT_MS = Number(process.env.BOT_WAIT_MS) || 20_000;
+const BOT_WAIT_MS = Number(process.env.BOT_WAIT_MS) || 10_000;
 const BOT_ELO_JITTER = 40; // bot rating = your Elo ± up to this
 const BOT_BASE_ACCURACY = 0.55; // chance the bot gets it, before popularity
 const INVITE_TTL_MS = 15 * 60 * 1000;

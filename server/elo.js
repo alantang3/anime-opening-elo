@@ -15,6 +15,13 @@ import { ELO_FLOOR } from "./db.js";
 export const K_BASE = 100;
 const K_FLOOR_MULT = 0.5; // even popular wins move Elo a lot
 
+// Wins are worth more than losses cost: correctly naming an OP is hard, so a
+// good guess should feel rewarding while a miss shouldn't gut your rating.
+// The loser drops only this fraction of the winner's gain — deliberately
+// NON-zero-sum (net Elo inflates over time, which also keeps the difficulty
+// ramp gentle).
+const LOSS_MULT = 0.5;
+
 // Timeout (nobody guessed before the song ended): both players lose a flat,
 // popularity-independent penalty. Kept flat on purpose — scaling it by
 // popularity creates perverse incentives either direction, and the product
@@ -35,8 +42,8 @@ export function effectiveK(popFactor) {
 
 /**
  * Resolve a decided round (someone guessed correctly, or a disconnect forfeit).
- * Zero-sum: the winner gains exactly what the loser drops, then the loser is
- * clamped to the Elo floor (the winner keeps their full gain).
+ * NON-zero-sum on purpose: the winner gains the full Elo delta, the loser
+ * drops only LOSS_MULT of it (then clamped to the Elo floor).
  */
 export function resolveWin(winnerElo, loserElo, popFactor) {
   const k = effectiveK(popFactor);
@@ -44,7 +51,7 @@ export function resolveWin(winnerElo, loserElo, popFactor) {
   const delta = k * (1 - expWin);
 
   const winnerAfter = winnerElo + delta;
-  const loserAfter = floor(loserElo - delta);
+  const loserAfter = floor(loserElo - delta * LOSS_MULT);
 
   return {
     kEff: round1(k),
