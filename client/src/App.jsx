@@ -892,8 +892,7 @@ export default function App() {
             </div>
 
             <p style={{ color: "var(--muted)", marginTop: 20 }}>
-              Obscure shows are worth far more Elo than popular ones. No
-              opponent in 20s? You’ll play a bot near your rating.
+              Battle players. Guess faster. Climb ELO.
             </p>
             <div
               className="button-row"
