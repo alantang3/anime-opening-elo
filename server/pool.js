@@ -9,10 +9,14 @@ import {
   getAnimeDetail,
   getOpeningThemes,
 } from "./animethemes.js";
-import { getPopularity } from "./popularity.js";
+import { getPopularity, membersToFactor } from "./popularity.js";
 import { buildAcceptedAnswers } from "./matching.js";
 import { dubFranchiseFor, isEnglishDub } from "./dubOverrides.js";
-import { upsertOpening, poolSize } from "./db.js";
+import {
+  upsertOpening,
+  poolSize,
+  backfillOpeningsFromCache,
+} from "./db.js";
 
 const PAGE = 25;
 const ITEMS_PER_TICK = 4;       // candidates resolved per tick
@@ -28,6 +32,12 @@ let running = false;
 async function ingestCandidate(c) {
   const detail = await getAnimeDetail(c.anime.slug);
   const pop = await getPopularity(detail.malId);
+  // Don't pool a show whose MAL popularity we don't know yet: a NULL would
+  // freeze into openings.members and stay invisible to the floor query
+  // forever. It'll be re-drawn later; once any Jikan pull succeeds the count
+  // is cached for good (mal_popularity) and it pools with a real number.
+  // backfillOpeningsFromCache() also rescues rows poisoned before this.
+  if (pop?.members == null) return 0;
   const { accepted, franchiseKey } = buildAcceptedAnswers({
     athName: c.anime?.name,
     seriesName: detail?.seriesName,
@@ -67,14 +77,24 @@ async function ingestCandidate(c) {
       return english.length;
     }
   }
-  upsertOpening({
-    ...common,
-    themeSlug: c.theme?.slug || "OP",
-    song: c.song?.title || null,
-    videoLink: c.video.link,
-    dubLabel: null,
-  });
-  return 1;
+  // Non-dub: store EVERY OP theme of this anime, not just the one random
+  // theme that was drawn — so a show contributes all its openings (Death
+  // Note OP1+OP2, every Naruto/BNHA OP, …) instead of one fixed one.
+  const themes = await getOpeningThemes(c.anime?.slug);
+  const ops = themes.filter((t) => !isEnglishDub(t.slug, t.link));
+  const list = ops.length
+    ? ops
+    : [{ slug: c.theme?.slug || "OP", link: c.video.link }];
+  for (const t of list)
+    upsertOpening({
+      ...common,
+      themeSlug: t.slug,
+      // Only the drawn theme has a known song title from this candidate.
+      song: t.slug === c.theme?.slug ? c.song?.title || null : null,
+      videoLink: t.link,
+      dubLabel: null,
+    });
+  return list.length;
 }
 
 async function tick() {
@@ -93,12 +113,28 @@ async function tick() {
     }
     await sleep(ITEM_DELAY_MS);
   }
+  // Rescue any rows whose members were frozen NULL but are now in the cache.
+  try {
+    const fixed = backfillOpeningsFromCache(membersToFactor);
+    if (fixed) console.log(`Pool backfill: fixed ${fixed} null-members row(s)`);
+  } catch {
+    /* never let the ingester throw */
+  }
   return n > 0;
 }
 
 export function startIngester() {
   if (running) return;
   running = true;
+  // Immediately rescue rows poisoned before this fix shipped (don't wait for
+  // the first tick, which can be many seconds out).
+  try {
+    const fixed = backfillOpeningsFromCache(membersToFactor);
+    if (fixed)
+      console.log(`Pool backfill (startup): fixed ${fixed} null-members row(s)`);
+  } catch {
+    /* non-fatal */
+  }
   const loop = async () => {
     let ok = false;
     try {

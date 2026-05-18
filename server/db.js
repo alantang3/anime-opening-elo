@@ -241,6 +241,19 @@ const stmt = {
   mostPopular: db.prepare(`
     SELECT * FROM openings ORDER BY members DESC LIMIT @limit
   `),
+  // Pool rows whose members froze NULL but whose show is now known in the
+  // popularity cache (a later pull succeeded for that mal_id).
+  nullMemberOpenings: db.prepare(`
+    SELECT o.anime_id AS anime_id, o.theme_slug AS theme_slug,
+           p.members AS members, p.score AS score
+      FROM openings o
+      JOIN mal_popularity p ON p.mal_id = o.mal_id
+     WHERE o.members IS NULL AND p.members IS NOT NULL
+  `),
+  setOpeningPop: db.prepare(`
+    UPDATE openings SET members=@members, score=@score, factor=@factor
+     WHERE anime_id=@anime_id AND theme_slug=@theme_slug
+  `),
 };
 
 // Look up (or create) the account for a verified Google profile, keyed by
@@ -434,6 +447,28 @@ export function pickPooledOpening({ minMembers, target, band = 25 }) {
     accepted: r.accepted ? JSON.parse(r.accepted) : [],
     dubLabel: r.dub_label,
   };
+}
+
+// Rescue pool rows whose `members` froze NULL (MAL was down the first time
+// that show was drawn) by copying the now-known count from the popularity
+// cache and recomputing `factor`. `membersToFactor` is passed in to avoid an
+// import cycle (popularity.js already imports this module). Returns the
+// number of rows fixed.
+export function backfillOpeningsFromCache(membersToFactor) {
+  const rows = stmt.nullMemberOpenings.all();
+  if (!rows.length) return 0;
+  const tx = db.transaction((rs) => {
+    for (const r of rs)
+      stmt.setOpeningPop.run({
+        anime_id: r.anime_id,
+        theme_slug: r.theme_slug,
+        members: r.members,
+        score: r.score,
+        factor: membersToFactor(r.members),
+      });
+  });
+  tx(rows);
+  return rows.length;
 }
 
 export default db;
