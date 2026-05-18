@@ -12,22 +12,32 @@ async function fetchJSON(url) {
   return r.json();
 }
 
-// The animetheme endpoint rejects a nested `anime.resources` include (422),
-// so the MAL id is resolved with a second call to the single-anime endpoint,
-// whose `resources` relation carries the MyAnimeList external_id.
-export async function getMalId(animeSlug) {
-  if (!animeSlug) return null;
+// The animetheme listing can't deep-include anime.resources (422), so we
+// make one follow-up call to the single-anime endpoint. That one call gives
+// us everything we need for both popularity (MAL id via `resources`) and
+// franchise guess-matching (`series` name + `animesynonyms` English/Native
+// titles). One request per evaluated candidate, not several.
+export async function getAnimeDetail(animeSlug) {
+  const empty = { malId: null, name: null, synonyms: [], seriesName: null, seriesSlug: null };
+  if (!animeSlug) return empty;
   try {
     const data = await fetchJSON(
       `${BASE}/anime/${encodeURIComponent(animeSlug)}` +
-        `?include=resources&fields[anime]=slug&fields[resource]=external_id,site`
+        `?include=series,animesynonyms,resources`
     );
-    const mal = (data.anime?.resources || []).find(
-      (x) => x.site === "MyAnimeList"
-    );
-    return mal ? Number(mal.external_id) : null;
+    const a = data.anime || {};
+    const mal = (a.resources || []).find((x) => x.site === "MyAnimeList");
+    return {
+      malId: mal ? Number(mal.external_id) : null,
+      name: a.name ?? null,
+      synonyms: (a.animesynonyms || [])
+        .map((s) => s.text)
+        .filter(Boolean),
+      seriesName: a.series?.name ?? null,
+      seriesSlug: a.series?.slug ?? null,
+    };
   } catch {
-    return null; // popularity service falls back to neutral on a null id
+    return empty; // popularity falls back to neutral; matcher uses what it has
   }
 }
 
@@ -61,10 +71,38 @@ export async function getOpeningCandidates(pageSize = 20) {
   return out;
 }
 
-// Convenience fallback: a single random opening with its MAL id resolved.
+// All OP themes for one anime as { slug, link }, best encode per theme.
+// Used to find a show's English ("-EN") opening for the dub franchises.
+export async function getOpeningThemes(animeSlug) {
+  if (!animeSlug) return [];
+  try {
+    const data = await fetchJSON(
+      `${BASE}/anime/${encodeURIComponent(animeSlug)}` +
+        `?include=animethemes.animethemeentries.videos`
+    );
+    const out = [];
+    for (const t of data.anime?.animethemes || []) {
+      if (t.type !== "OP") continue;
+      for (const entry of t.animethemeentries || []) {
+        const video = [...(entry.videos || [])].sort(
+          (a, b) => (b.resolution || 0) - (a.resolution || 0)
+        )[0];
+        if (video?.link) {
+          out.push({ slug: t.slug, link: video.link });
+          break;
+        }
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// Convenience fallback: a single random opening with its detail resolved.
 export async function getRandomOpening() {
   const [c] = await getOpeningCandidates(15);
-  return { ...c, malId: await getMalId(c.anime.slug) };
+  return { ...c, detail: await getAnimeDetail(c.anime.slug) };
 }
 
 export async function searchAnime(query) {

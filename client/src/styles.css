@@ -36,6 +36,18 @@ html, body, #root {
   margin-bottom: 24px;
 }
 
+.title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.app-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  box-shadow: 0 4px 14px rgba(124, 92, 255, 0.25);
+  display: block;
+}
 .title {
   font-size: 28px;
   font-weight: 700;
@@ -282,3 +294,115 @@ button.danger { background: transparent; color: var(--danger); border: 1px solid
   white-space: pre-wrap;
 }
 .result .year { color: var(--muted); font-weight: 400; font-size: 14px; }
+
+.rating-pill { display: flex; align-items: center; gap: 6px; }
+.rating-pill .avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.rating-pill .signout {
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 0 2px;
+  margin-left: 4px;
+  cursor: pointer;
+}
+.rating-pill .signout:hover { color: var(--danger); }
+
+.av-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.av-btn {
+  flex: none;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.av-btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.av-peer {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: auto;
+}
+.av-videos {
+  position: relative;
+  margin-bottom: 16px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+}
+.av-remote {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+.av-remote.empty::after { content: ""; }
+.av-local {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 26%;
+  max-width: 160px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #000;
+  object-fit: cover;
+  transform: scaleX(-1); /* mirror own preview */
+}
+
+.volume-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.volume-row .vol-icon {
+  cursor: pointer;
+  font-size: 18px;
+  user-select: none;
+  line-height: 1;
+}
+.volume-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.volume-row .vol-pct {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+
+.dub-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}

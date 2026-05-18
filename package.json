@@ -4,8 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "concurrently --names \"server,client\" --prefix-colors \"cyan,magenta\" \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
-    "start": "concurrently --names \"server,client\" --prefix-colors \"cyan,magenta\" \"npm --prefix server start\" \"npm --prefix client run preview\"",
+    "build": "npm --prefix server install && npm --prefix client install && npm --prefix client run build",
+    "start": "node server/server.js",
     "install:all": "npm install && npm --prefix server install && npm --prefix client install"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

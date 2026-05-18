@@ -1,34 +1,39 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 
-// Screen phases driven almost entirely by server events.
+// Screen phases. AUTH/LOBBY are local; the rest are driven by server events.
 const PHASE = {
-  NICK: "nick",       // choosing a nickname
-  QUEUE: "queue",     // waiting for an opponent
-  PREPARE: "prepare", // opponent found, buffering the opening
+  AUTH: "auth",       // not signed in
+  LOBBY: "lobby",     // signed in, idle
+  QUEUE: "queue",
+  PREPARE: "prepare",
   COUNTDOWN: "countdown",
-  PLAYING: "playing", // racing to guess
-  RESULT: "result",   // answer revealed + rematch vote
+  PLAYING: "playing",
+  RESULT: "result",
 };
 
-const LS_GUEST = "aoe.guestId";
-const LS_NICK = "aoe.nickname";
+const LS_TOKEN = "aoe.token";
+const LS_VOL = "aoe.volume";
+const STUN = [{ urls: "stun:stun.l.google.com:19302" }];
 
 export default function App() {
   const socketRef = useRef(null);
   const videoRef = useRef(null);
 
+  const [volume, setVolume] = useState(() => {
+    const v = parseFloat(localStorage.getItem(LS_VOL));
+    return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.7;
+  });
+
   const [connected, setConnected] = useState(false);
-  const [phase, setPhase] = useState(PHASE.NICK);
-  const [nickname, setNickname] = useState(
-    () => localStorage.getItem(LS_NICK) || ""
-  );
-  const [me, setMe] = useState(null);          // { nickname, elo, wins, losses }
+  const [phase, setPhase] = useState(PHASE.AUTH);
+  const [googleClientId, setGoogleClientId] = useState(null);
+  const [me, setMe] = useState(null);
   const [opponent, setOpponent] = useState(null);
-  const [roundInfo, setRoundInfo] = useState(null); // { round, videoUrl, durationMs }
+  const [roundInfo, setRoundInfo] = useState(null);
   const [countdown, setCountdown] = useState(0);
-  const [remaining, setRemaining] = useState(1); // 0..1 fraction for timer bar
-  const [feedback, setFeedback] = useState(null); // transient guess feedback
+  const [remaining, setRemaining] = useState(1);
+  const [feedback, setFeedback] = useState(null);
   const [oppStatus, setOppStatus] = useState(null);
   const [result, setResult] = useState(null);
   const [votes, setVotes] = useState({ you: null, opponent: null });
@@ -43,25 +48,52 @@ export default function App() {
   const searchTimer = useRef(null);
   const inputRef = useRef(null);
 
-  const durationRef = useRef(null); // ms, for the visual timer
+  const durationRef = useRef(null);
   const playStartRef = useRef(null);
   const tickRef = useRef(null);
+  const tokenRef = useRef(localStorage.getItem(LS_TOKEN) || null);
+  const googleBtnRef = useRef(null);
+
+  // ---- WebRTC (opt-in camera/mic with the opponent) ----
+  const pcRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const politeRef = useRef(false);
+  const makingOfferRef = useRef(false);
+  const ignoreOfferRef = useRef(false);
+  const [camOn, setCamOn] = useState(false);
+  const [micOn, setMicOn] = useState(false);
+  const [hasRemote, setHasRemote] = useState(false);
+  const [peerAV, setPeerAV] = useState({ cam: false, mic: false });
 
   // ---------- Socket setup ----------
   useEffect(() => {
     const socket = io({ path: "/socket.io" });
     socketRef.current = socket;
 
-    socket.on("connect", () => setConnected(true));
+    socket.on("connect", () => {
+      setConnected(true);
+      if (tokenRef.current) socket.emit("auth", { token: tokenRef.current });
+    });
     socket.on("disconnect", () => {
       setConnected(false);
       setNotice("Disconnected from server. Reconnecting…");
     });
 
-    socket.on("joined", ({ guestId, player }) => {
-      localStorage.setItem(LS_GUEST, guestId);
-      localStorage.setItem(LS_NICK, player.nickname);
+    socket.on("authed", ({ player }) => {
       setMe(player);
+      setNotice(null);
+      setPhase((p) =>
+        p === PHASE.AUTH || p === PHASE.QUEUE ? PHASE.LOBBY : p
+      );
+    });
+    socket.on("authError", ({ message }) => {
+      localStorage.removeItem(LS_TOKEN);
+      tokenRef.current = null;
+      setMe(null);
+      setPhase(PHASE.AUTH);
+      setNotice(message || "Please sign in again.");
     });
 
     socket.on("queued", () => {
@@ -69,20 +101,24 @@ export default function App() {
       setNotice(null);
       setResult(null);
     });
-    socket.on("queueCancelled", () => setPhase(PHASE.NICK));
+    socket.on("queueCancelled", () => setPhase(PHASE.LOBBY));
 
-    socket.on("matchFound", ({ you, opponent }) => {
+    socket.on("matchFound", ({ you, opponent, polite }) => {
       setMe(you);
       setOpponent(opponent);
+      politeRef.current = !!polite;
       setResult(null);
       setVotes({ you: null, opponent: null });
       setFeedback(null);
       setOppStatus(null);
       setNotice(null);
+      setHasRemote(false);
+      setPeerAV({ cam: false, mic: false });
+      ensurePeer(); // ready to negotiate if either side enables A/V
       setPhase(PHASE.PREPARE);
     });
 
-    socket.on("round:prepare", ({ round, videoUrl }) => {
+    socket.on("round:prepare", ({ round, videoUrl, dub }) => {
       setResult(null);
       setVotes({ you: null, opponent: null });
       setFeedback(null);
@@ -90,7 +126,7 @@ export default function App() {
       setQuery("");
       setOptions([]);
       setPicked(null);
-      setRoundInfo({ round, videoUrl, durationMs: null });
+      setRoundInfo({ round, videoUrl, dub: dub || null, durationMs: null });
       setPhase(PHASE.PREPARE);
     });
 
@@ -113,9 +149,8 @@ export default function App() {
       if (!correct) {
         setFeedback("Not it — keep guessing!");
         setPicked(null);
-        setQuery("");
         setOptions([]);
-        setTimeout(() => inputRef.current?.focus(), 30);
+        setTimeout(() => inputRef.current?.select(), 30);
       }
     });
     socket.on("opponent:guessed", () => {
@@ -138,6 +173,7 @@ export default function App() {
     });
 
     socket.on("opponent:left", ({ forfeited }) => {
+      teardownRTC();
       setNotice(
         forfeited
           ? "Opponent left mid-round — you win this one. Finding a new opponent…"
@@ -145,36 +181,97 @@ export default function App() {
       );
     });
     socket.on("match:over", ({ reason }) => {
-      if (reason === "you_left") setPhase(PHASE.NICK);
+      teardownRTC();
+      if (reason === "you_left") setPhase(PHASE.LOBBY);
       else setNotice("Match ended. Finding a new opponent…");
     });
 
     socket.on("errorMsg", ({ message }) => setNotice(message));
 
+    // WebRTC signaling (perfect negotiation).
+    socket.on("rtc:signal", (payload) => onSignal(payload));
+    socket.on("rtc:peerState", (s) =>
+      setPeerAV({ cam: !!s.cam, mic: !!s.mic })
+    );
+
     return () => socket.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-join once connected if we already have a saved nickname.
+  // ---------- Google sign-in ----------
   useEffect(() => {
-    if (connected && nickname && !me) doJoin(nickname);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connected]);
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((c) => setGoogleClientId(c.googleClientId || ""))
+      .catch(() => setGoogleClientId(""));
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true;
+    s.defer = true;
+    document.head.appendChild(s);
+  }, []);
 
-  function doJoin(name) {
-    socketRef.current?.emit("join", {
-      nickname: name,
-      guestId: localStorage.getItem(LS_GUEST) || undefined,
-    });
+  useEffect(() => {
+    if (phase !== PHASE.AUTH || !googleClientId || !googleBtnRef.current)
+      return;
+    let tries = 0;
+    const iv = setInterval(() => {
+      const g = window.google?.accounts?.id;
+      if (!g) {
+        if (++tries > 50) clearInterval(iv);
+        return;
+      }
+      clearInterval(iv);
+      g.initialize({
+        client_id: googleClientId,
+        callback: ({ credential }) => handleGoogleCredential(credential),
+      });
+      googleBtnRef.current.innerHTML = "";
+      g.renderButton(googleBtnRef.current, {
+        theme: "filled_blue",
+        size: "large",
+        text: "signin_with",
+        shape: "pill",
+      });
+    }, 100);
+    return () => clearInterval(iv);
+  }, [phase, googleClientId]);
+
+  async function handleGoogleCredential(credential) {
+    try {
+      const r = await fetch("/api/auth/google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential }),
+      }).then((x) => x.json());
+      if (!r.token) throw new Error(r.error || "sign-in failed");
+      localStorage.setItem(LS_TOKEN, r.token);
+      tokenRef.current = r.token;
+      setMe(r.player);
+      setNotice(null);
+      socketRef.current?.emit("auth", { token: r.token });
+      setPhase(PHASE.LOBBY);
+    } catch (e) {
+      setNotice("Google sign-in failed. Try again.");
+    }
   }
 
-  // ---------- Timer (visual only; server is authoritative on round end) ----------
+  function signOut() {
+    localStorage.removeItem(LS_TOKEN);
+    tokenRef.current = null;
+    teardownRTC();
+    setMe(null);
+    setPhase(PHASE.AUTH);
+  }
+
+  // ---------- Timer (visual only; server is authoritative) ----------
   function beginPlaying() {
     setPhase(PHASE.PLAYING);
     playStartRef.current = Date.now();
     setRemaining(1);
     const v = videoRef.current;
     if (v) {
+      v.volume = volume;
       v.currentTime = 0;
       v.play().catch(() => {});
     }
@@ -192,9 +289,25 @@ export default function App() {
     const v = videoRef.current;
     if (v) v.pause();
   }
-  useEffect(() => () => clearInterval(tickRef.current), []);
+  useEffect(
+    () => () => {
+      clearInterval(tickRef.current);
+      teardownRTC();
+    },
+    []
+  );
 
-  // Report the loaded media length so the server can size the round timer.
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.volume = volume;
+  }, [volume, roundInfo?.videoUrl, phase]);
+
+  function changeVolume(val) {
+    const v = Math.min(1, Math.max(0, val));
+    setVolume(v);
+    localStorage.setItem(LS_VOL, String(v));
+    if (videoRef.current) videoRef.current.volume = v;
+  }
+
   function onLoadedMetadata() {
     const v = videoRef.current;
     if (v && Number.isFinite(v.duration)) {
@@ -202,6 +315,127 @@ export default function App() {
         ms: Math.round(v.duration * 1000),
       });
     }
+  }
+
+  // ---------- WebRTC ----------
+  function ensurePeer() {
+    if (pcRef.current) return pcRef.current;
+    const pc = new RTCPeerConnection({ iceServers: STUN });
+    pcRef.current = pc;
+
+    pc.onnegotiationneeded = async () => {
+      try {
+        makingOfferRef.current = true;
+        await pc.setLocalDescription();
+        socketRef.current?.emit("rtc:signal", {
+          description: pc.localDescription,
+        });
+      } catch (e) {
+        console.error("negotiation", e);
+      } finally {
+        makingOfferRef.current = false;
+      }
+    };
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate)
+        socketRef.current?.emit("rtc:signal", { candidate });
+    };
+    pc.ontrack = ({ streams }) => {
+      if (remoteVideoRef.current && streams[0]) {
+        remoteVideoRef.current.srcObject = streams[0];
+      }
+      setHasRemote(true);
+    };
+    pc.onconnectionstatechange = () => {
+      if (["failed", "closed", "disconnected"].includes(pc.connectionState))
+        setHasRemote(false);
+    };
+    return pc;
+  }
+
+  async function onSignal({ description, candidate }) {
+    const pc = ensurePeer();
+    try {
+      if (description) {
+        const offerCollision =
+          description.type === "offer" &&
+          (makingOfferRef.current || pc.signalingState !== "stable");
+        ignoreOfferRef.current = !politeRef.current && offerCollision;
+        if (ignoreOfferRef.current) return;
+        await pc.setRemoteDescription(description);
+        if (description.type === "offer") {
+          await pc.setLocalDescription();
+          socketRef.current?.emit("rtc:signal", {
+            description: pc.localDescription,
+          });
+        }
+      } else if (candidate) {
+        try {
+          await pc.addIceCandidate(candidate);
+        } catch (e) {
+          if (!ignoreOfferRef.current) throw e;
+        }
+      }
+    } catch (e) {
+      console.error("onSignal", e);
+    }
+  }
+
+  async function applyMedia(nextCam, nextMic) {
+    const pc = ensurePeer();
+    try {
+      // Drop any current local tracks/senders.
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((t) => t.stop());
+        localStreamRef.current = null;
+      }
+      pc.getSenders().forEach((s) => {
+        if (s.track) {
+          try {
+            pc.removeTrack(s);
+          } catch {}
+        }
+      });
+
+      let stream = null;
+      if (nextCam || nextMic) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: nextCam,
+          audio: nextMic,
+        });
+        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+      }
+      localStreamRef.current = stream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      setCamOn(nextCam);
+      setMicOn(nextMic);
+      socketRef.current?.emit("rtc:state", { cam: nextCam, mic: nextMic });
+    } catch (e) {
+      setNotice("Couldn't access camera/mic (permission denied?).");
+      setCamOn(false);
+      setMicOn(false);
+    }
+  }
+  const toggleCam = () => applyMedia(!camOn, micOn);
+  const toggleMic = () => applyMedia(camOn, !micOn);
+
+  function teardownRTC() {
+    try {
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    } catch {}
+    localStreamRef.current = null;
+    try {
+      pcRef.current?.close();
+    } catch {}
+    pcRef.current = null;
+    if (localVideoRef.current) localVideoRef.current.srcObject = null;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    makingOfferRef.current = false;
+    ignoreOfferRef.current = false;
+    setCamOn(false);
+    setMicOn(false);
+    setHasRemote(false);
+    setPeerAV({ cam: false, mic: false });
   }
 
   // ---------- Autocomplete ----------
@@ -228,21 +462,15 @@ export default function App() {
   }, [query]);
 
   const submitGuess = useCallback(() => {
-    if (!picked) return;
-    socketRef.current?.emit("guess", { animeId: picked.id });
-  }, [picked]);
+    const guessText = query.trim();
+    if (!guessText) return;
+    socketRef.current?.emit("guess", { guessText, animeId: picked?.id });
+  }, [query, picked]);
 
   function onKeyDown(e) {
     if (e.key === "Enter") {
       e.preventDefault();
-      if (options.length && !picked) {
-        const opt = options[activeIdx];
-        setPicked(opt);
-        setQuery(opt.name);
-        setOptions([]);
-      } else if (picked) {
-        submitGuess();
-      }
+      submitGuess();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIdx((i) => Math.min(options.length - 1, i + 1));
@@ -255,12 +483,7 @@ export default function App() {
   }
 
   // ---------- Actions ----------
-  function startQueue() {
-    const name = nickname.trim();
-    if (!name) return;
-    if (!me) doJoin(name);
-    socketRef.current?.emit("queue");
-  }
+  const findMatch = () => socketRef.current?.emit("queue");
   const cancelQueue = () => socketRef.current?.emit("cancelQueue");
   const leaveMatch = () => socketRef.current?.emit("leaveMatch");
   const vote = (yes) => socketRef.current?.emit("rematchVote", { yes });
@@ -275,7 +498,12 @@ export default function App() {
     refreshBoard();
   }, []);
 
-  // ---------- Render helpers ----------
+  const inMatch =
+    phase === PHASE.PREPARE ||
+    phase === PHASE.COUNTDOWN ||
+    phase === PHASE.PLAYING ||
+    phase === PHASE.RESULT;
+
   const PlayerBadge = ({ p, label }) =>
     p && (
       <div className="vs-side">
@@ -288,13 +516,22 @@ export default function App() {
   return (
     <div className="app">
       <div className="header">
-        <div className="title">
-          Anime Opening <span>Elo</span>
+        <div className="title-wrap">
+          <img src="/anitune.png" alt="AniTune" className="app-icon" />
+          <div className="title">
+            Guess the Anime <span>OP</span>
+          </div>
         </div>
         {me && (
           <div className="rating-pill">
+            {me.avatar && (
+              <img className="avatar" src={me.avatar} alt="" referrerPolicy="no-referrer" />
+            )}
             <small>{me.nickname}</small>
             {me.elo}
+            <button className="signout" onClick={signOut} title="Sign out">
+              ⏻
+            </button>
           </div>
         )}
       </div>
@@ -302,31 +539,41 @@ export default function App() {
       {notice && <div className="notice">{notice}</div>}
 
       <div className="card">
-        {/* ---------- Nickname ---------- */}
-        {phase === PHASE.NICK && (
-          <div style={{ textAlign: "center", padding: "24px 0" }}>
+        {/* ---------- Sign in ---------- */}
+        {phase === PHASE.AUTH && (
+          <div style={{ textAlign: "center", padding: "28px 0" }}>
             <p style={{ color: "var(--muted)", marginTop: 0 }}>
-              Get matched against another player. You both hear the same
-              opening — first to name the anime wins Elo. Obscure shows are
-              worth far more than popular ones.
+              Get matched against another player, hear the same opening, and
+              race to name the anime. Sign in so your Elo and place on the
+              leaderboard stick to your account.
             </p>
-            <div style={{ maxWidth: 320, margin: "20px auto 0" }}>
-              <input
-                type="text"
-                placeholder="Pick a nickname"
-                value={nickname}
-                maxLength={24}
-                onChange={(e) => setNickname(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && startQueue()}
-              />
-              <div className="button-row">
-                <button
-                  onClick={startQueue}
-                  disabled={!connected || !nickname.trim()}
-                >
-                  {connected ? "Find a match" : "Connecting…"}
-                </button>
+            {googleClientId === "" ? (
+              <div className="notice" style={{ marginTop: 16 }}>
+                Google sign-in isn’t configured yet — set{" "}
+                <code>GOOGLE_CLIENT_ID</code> on the server.
               </div>
+            ) : (
+              <div
+                ref={googleBtnRef}
+                style={{ display: "flex", justifyContent: "center", marginTop: 20 }}
+              />
+            )}
+          </div>
+        )}
+
+        {/* ---------- Lobby ---------- */}
+        {phase === PHASE.LOBBY && (
+          <div style={{ textAlign: "center", padding: "32px 0" }}>
+            <p style={{ marginTop: 0 }}>
+              Welcome back, <strong>{me?.nickname}</strong>.
+            </p>
+            <p style={{ color: "var(--muted)" }}>
+              Obscure shows are worth far more Elo than popular ones.
+            </p>
+            <div className="button-row" style={{ maxWidth: 240, margin: "16px auto 0" }}>
+              <button onClick={findMatch} disabled={!connected}>
+                {connected ? "Find a match" : "Connecting…"}
+              </button>
             </div>
           </div>
         )}
@@ -343,11 +590,8 @@ export default function App() {
           </div>
         )}
 
-        {/* ---------- Versus bar (prepare / countdown / playing / result) ---------- */}
-        {(phase === PHASE.PREPARE ||
-          phase === PHASE.COUNTDOWN ||
-          phase === PHASE.PLAYING ||
-          phase === PHASE.RESULT) && (
+        {/* ---------- Match ---------- */}
+        {inMatch && (
           <>
             <div className="vs-bar">
               <PlayerBadge p={me} label="YOU" />
@@ -358,7 +602,6 @@ export default function App() {
             </div>
 
             <div className="player-wrap">
-              {/* Audio-only while guessing; visible (with controls) on result. */}
               <video
                 ref={videoRef}
                 key={roundInfo?.videoUrl}
@@ -381,11 +624,74 @@ export default function App() {
               {phase === PHASE.PLAYING && (
                 <div className="player-cover">
                   ▶ audio playing — name the anime
+                  {roundInfo?.dub && (
+                    <span className="dub-badge">🎙 English dub</span>
+                  )}
                 </div>
               )}
             </div>
 
-            {/* ---------- Playing ---------- */}
+            {/* ---- Camera / mic with opponent ---- */}
+            <div className="av-bar">
+              <button
+                className={"av-btn" + (camOn ? " on" : "")}
+                onClick={toggleCam}
+              >
+                {camOn ? "📷 Camera on" : "📷 Camera"}
+              </button>
+              <button
+                className={"av-btn" + (micOn ? " on" : "")}
+                onClick={toggleMic}
+              >
+                {micOn ? "🎤 Mic on" : "🎤 Mic"}
+              </button>
+              <span className="av-peer">
+                {opponent?.nickname}:{" "}
+                {peerAV.cam || peerAV.mic
+                  ? `${peerAV.cam ? "📷" : ""}${peerAV.mic ? "🎤" : ""}`
+                  : "—"}
+              </span>
+            </div>
+            {(camOn || micOn || hasRemote) && (
+              <div className="av-videos">
+                <video
+                  ref={remoteVideoRef}
+                  autoPlay
+                  playsInline
+                  className={"av-remote" + (hasRemote ? "" : " empty")}
+                />
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="av-local"
+                />
+              </div>
+            )}
+
+            {phase === PHASE.PLAYING && (
+              <div className="volume-row">
+                <span
+                  className="vol-icon"
+                  onClick={() => changeVolume(volume === 0 ? 0.7 : 0)}
+                  title={volume === 0 ? "Unmute" : "Mute"}
+                >
+                  {volume === 0 ? "🔇" : volume < 0.5 ? "🔉" : "🔊"}
+                </span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={volume}
+                  onChange={(e) => changeVolume(parseFloat(e.target.value))}
+                  aria-label="Volume"
+                />
+                <span className="vol-pct">{Math.round(volume * 100)}%</span>
+              </div>
+            )}
+
             {phase === PHASE.PLAYING && (
               <>
                 <div className="timer-bar">
@@ -397,10 +703,11 @@ export default function App() {
                   <input
                     ref={inputRef}
                     type="text"
-                    placeholder="Start typing an anime name…"
+                    placeholder="Anime name — English, Japanese, or acronym (AoT, MHA)…"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={onKeyDown}
+                    autoComplete="off"
                   />
                   {options.length > 0 && !picked && (
                     <div className="autocomplete">
@@ -424,7 +731,7 @@ export default function App() {
                   )}
                 </div>
                 <div className="button-row">
-                  <button onClick={submitGuess} disabled={!picked}>
+                  <button onClick={submitGuess} disabled={!query.trim()}>
                     Submit guess
                   </button>
                   <button className="danger" onClick={leaveMatch}>
@@ -434,7 +741,6 @@ export default function App() {
               </>
             )}
 
-            {/* ---------- Result + rematch ---------- */}
             {phase === PHASE.RESULT && result && (
               <ResultPanel
                 result={result}
@@ -505,6 +811,12 @@ function ResultPanel({ result, votes, opponent, onVote }) {
           <span className="year"> ({result.answer.year})</span>
         )}
       </div>
+      {result.answer?.franchise &&
+        result.answer.franchise !== result.answer.name && (
+          <div style={{ color: "var(--muted)", fontSize: 13 }}>
+            franchise: {result.answer.franchise}
+          </div>
+        )}
       {result.answer?.song && (
         <div style={{ color: "var(--muted)", fontSize: 14 }}>
           ♪ {result.answer.song}
@@ -512,8 +824,7 @@ function ResultPanel({ result, votes, opponent, onVote }) {
       )}
 
       <div style={{ marginTop: 10 }}>
-        Your Elo:{" "}
-        <strong>{r.eloAfter}</strong>{" "}
+        Your Elo: <strong>{r.eloAfter}</strong>{" "}
         <span className={delta >= 0 ? "delta-pos" : "delta-neg"}>
           ({delta >= 0 ? "+" : ""}
           {delta})
@@ -536,12 +847,9 @@ function ResultPanel({ result, votes, opponent, onVote }) {
       </div>
 
       <div className="rematch">
-        <div className="rematch-q">
-          Play {opponent?.nickname} again?
-        </div>
+        <div className="rematch-q">Play {opponent?.nickname} again?</div>
         <div className="vote-state">
-          You:{" "}
-          <b>{votes.you == null ? "—" : votes.you ? "Yes" : "No"}</b>
+          You: <b>{votes.you == null ? "—" : votes.you ? "Yes" : "No"}</b>
           {"   "}Opponent:{" "}
           <b>
             {votes.opponent == null
@@ -552,10 +860,7 @@ function ResultPanel({ result, votes, opponent, onVote }) {
           </b>
         </div>
         <div className="button-row">
-          <button
-            onClick={() => onVote(true)}
-            disabled={votes.you != null}
-          >
+          <button onClick={() => onVote(true)} disabled={votes.you != null}>
             {votes.you === true ? "Waiting for opponent…" : "Yes, rematch"}
           </button>
           <button

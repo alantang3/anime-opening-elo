@@ -1,0 +1,38 @@
+# Render Blueprint — one Node web service that serves the API, the
+# Socket.IO websocket, AND the built React app, with a persistent disk so
+# player Elo / leaderboard survive redeploys.
+#
+# Deploy: push this repo to GitHub, then on render.com →
+#   New → Blueprint → pick the repo. Render reads this file.
+#
+# NOTE: persistent disks require a paid instance (the `starter` plan, ~$7/mo).
+# Render's free plan has NO disk and sleeps after ~15 min idle (a cold start
+# drops any in-progress match). For a free deploy, remove the `disk:` block
+# and set `plan: free` — but the SQLite DB then resets on every deploy.
+services:
+  - type: web
+    name: anime-opening-elo
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22.20.0"
+      - key: DATA_DIR
+        value: /var/data
+      # Required for Google sign-in. Set this in the Render dashboard
+      # (Environment) — paste the OAuth Web client ID from Google Cloud.
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      # Optional: auto-generated into DATA_DIR if left unset.
+      - key: SESSION_SECRET
+        sync: false
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1

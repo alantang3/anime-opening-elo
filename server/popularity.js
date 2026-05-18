@@ -46,10 +46,19 @@ async function fetchJikan(malId) {
     });
     if (!r.ok) throw new Error(`Jikan ${r.status}`);
     const { data } = await r.json();
+    // All title variants — crucially title_english (the dub/English name:
+    // "Pokémon", "My Hero Academia") and title_japanese — for guess matching.
+    const titles = [
+      data?.title,
+      data?.title_english,
+      data?.title_japanese,
+      ...(data?.title_synonyms || []),
+    ].filter((s) => s && String(s).trim());
     return {
       members: data?.members ?? null,
       score: data?.score ?? null,
       title: data?.title ?? null,
+      titles: [...new Set(titles)],
     };
   } finally {
     clearTimeout(timer);
@@ -60,13 +69,22 @@ async function fetchJikan(malId) {
 // don't both hammer Jikan.
 const inflight = new Map();
 
+const parseTitles = (json) => {
+  try {
+    const a = JSON.parse(json || "[]");
+    return Array.isArray(a) ? a : [];
+  } catch {
+    return [];
+  }
+};
+
 /**
  * @returns {Promise<{factor:number, members:number|null, score:number|null,
- *   title:string|null, source:'cache'|'jikan'|'fallback'}>}
+ *   title:string|null, titles:string[], source:'cache'|'jikan'|'fallback'}>}
  */
 export async function getPopularity(malId) {
   if (!malId) {
-    return { factor: NEUTRAL, members: null, score: null, title: null, source: "fallback" };
+    return { factor: NEUTRAL, members: null, score: null, title: null, titles: [], source: "fallback" };
   }
 
   const cached = getCachedPopularity(malId);
@@ -78,6 +96,7 @@ export async function getPopularity(malId) {
       members: cached.members,
       score: cached.score,
       title: cached.title,
+      titles: parseTitles(cached.titles),
       source: "cache",
     };
   }
@@ -93,6 +112,7 @@ export async function getPopularity(malId) {
         members: info.members,
         score: info.score,
         title: info.title,
+        titles: info.titles,
         source: "jikan",
       };
     } catch {
@@ -103,10 +123,11 @@ export async function getPopularity(malId) {
           members: cached.members,
           score: cached.score,
           title: cached.title,
+          titles: parseTitles(cached.titles),
           source: "cache",
         };
       }
-      return { factor: NEUTRAL, members: null, score: null, title: null, source: "fallback" };
+      return { factor: NEUTRAL, members: null, score: null, title: null, titles: [], source: "fallback" };
     } finally {
       inflight.delete(malId);
     }

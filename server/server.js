@@ -15,17 +15,21 @@ import express from "express";
 import cors from "cors";
 import http from "http";
 import crypto from "crypto";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
 import { Server } from "socket.io";
 
-import {
-  getOrCreatePlayer,
-  getPlayer,
-  applyMatchResult,
-  leaderboard,
-} from "./db.js";
+import { getPlayer, applyMatchResult, leaderboard } from "./db.js";
 import { searchAnime } from "./animethemes.js";
+import { isCorrect } from "./matching.js";
 import { pickOpeningForElo } from "./selectOpening.js";
 import { resolveWin, resolveTimeout } from "./elo.js";
+import {
+  GOOGLE_CLIENT_ID,
+  loginWithGoogle,
+  verifySession,
+} from "./auth.js";
 
 // ---------- Tunables ----------
 const PORT = process.env.PORT || 5174;
@@ -43,6 +47,23 @@ app.use(express.json());
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
+// Public config the client needs to render the Google button.
+app.get("/api/config", (_req, res) =>
+  res.json({ googleClientId: GOOGLE_CLIENT_ID })
+);
+
+// Exchange a Google ID token for our session token.
+app.post("/api/auth/google", async (req, res) => {
+  try {
+    const { credential } = req.body || {};
+    const { token, player } = await loginWithGoogle(credential);
+    res.json({ token, player: publicPlayer(player) });
+  } catch (err) {
+    console.error("auth/google:", err.message);
+    res.status(401).json({ error: "Google sign-in failed" });
+  }
+});
+
 app.get("/api/search", async (req, res) => {
   try {
     res.json({ results: await searchAnime(String(req.query.q || "")) });
@@ -56,11 +77,28 @@ app.get("/api/leaderboard", (_req, res) => {
   res.json({ players: leaderboard(20) });
 });
 
+// ---------- Static frontend (production single-service) ----------
+// In dev the client runs on Vite, which proxies /api and /socket.io here.
+// In production this same process also serves the built React app, so the
+// whole thing is one deploy on one origin (no CORS, no separate frontend).
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CLIENT_DIST = path.join(__dirname, "..", "client", "dist");
+if (fs.existsSync(path.join(CLIENT_DIST, "index.html"))) {
+  app.set("trust proxy", 1); // Render/Fly terminate TLS at a front proxy
+  app.use(express.static(CLIENT_DIST));
+  // SPA fallback: any non-API GET returns index.html. Socket.IO intercepts
+  // /socket.io before Express, so it never reaches this.
+  app.get(/^\/(?!api\/).*/, (_req, res) =>
+    res.sendFile(path.join(CLIENT_DIST, "index.html"))
+  );
+  console.log("Serving built client from", CLIENT_DIST);
+}
+
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true } });
 
 // ---------- Connection + match state ----------
-// socket.id -> { socket, guestId, player, status: 'idle'|'queued'|'match', matchId }
+// socket.id -> { socket, player, status: 'idle'|'queued'|'match', matchId }
 const conns = new Map();
 // FIFO matchmaking queue of socket ids.
 let queue = [];
@@ -79,7 +117,13 @@ const snapshot = (row) => ({
 
 function publicPlayer(row) {
   const s = snapshot(row);
-  return { nickname: s.nickname, elo: s.elo, wins: s.wins, losses: s.losses };
+  return {
+    nickname: s.nickname,
+    elo: s.elo,
+    wins: s.wins,
+    losses: s.losses,
+    avatar: row.avatar || null,
+  };
 }
 
 // ---------- Matchmaking ----------
@@ -145,13 +189,17 @@ function createMatch(a, b) {
     c.socket.join(id);
   }
   const [pa, pb] = match.members;
+  // `polite` is the WebRTC perfect-negotiation tiebreaker — exactly one peer
+  // is polite so simultaneous offers can't deadlock.
   pa.socket.emit("matchFound", {
     you: publicPlayer(pa.player),
     opponent: publicPlayer(pb.player),
+    polite: false,
   });
   pb.socket.emit("matchFound", {
     you: publicPlayer(pb.player),
     opponent: publicPlayer(pa.player),
+    polite: true,
   });
 
   startRound(match);
@@ -162,6 +210,9 @@ async function startRound(match) {
   match.round += 1;
   match.opening = null;
   match.correctAnimeId = null;
+  match.accepted = [];
+  match.franchise = null;
+  match.dub = null;
   match.durationMs = null;
   match.startedAt = null;
   match.reported.clear();
@@ -189,6 +240,9 @@ async function startRound(match) {
 
   match.opening = opening;
   match.correctAnimeId = Number(opening.anime.id);
+  match.accepted = opening.accepted || [];
+  match.franchise = opening.franchise || null;
+  match.dub = opening.dub || null; // {label,key} when playing an English dub
   match.popularity = opening.popularity;
   console.log(
     `[match ${match.id.slice(0, 8)}] avgElo=${Math.round(avgElo)} ` +
@@ -200,6 +254,7 @@ async function startRound(match) {
   io.to(match.id).emit("round:prepare", {
     round: match.round,
     videoUrl: opening.video.link,
+    dub: match.dub?.label || null,
   });
 
   // Give clients a window to buffer + report media length, then start.
@@ -251,9 +306,14 @@ function beginCountdown(match) {
   }, COUNTDOWN_MS);
 }
 
-function handleGuess(match, conn, animeId) {
+function handleGuess(match, conn, { animeId, guessText } = {}) {
   if (!match || match.state !== "playing") return;
-  const correct = Number(animeId) === match.correctAnimeId;
+  // Correct if they picked the exact entry from autocomplete, OR typed any
+  // accepted franchise name (English / Japanese / acronym / dub / any
+  // season or movie title of the franchise).
+  const correct =
+    (animeId != null && Number(animeId) === match.correctAnimeId) ||
+    isCorrect(guessText, match.accepted);
 
   if (!correct) {
     // Unlimited guesses (per spec) — just inform both sides for tension.
@@ -353,6 +413,8 @@ function emitRoundEnd(match, perSocket) {
   const answer = {
     id: match.correctAnimeId,
     name: match.opening.anime.name,
+    franchise: match.franchise,
+    dub: match.dub?.label || null,
     year: match.opening.anime.year,
     song: match.opening.song?.title || null,
   };
@@ -477,31 +539,30 @@ function finalizeAfterForfeit(match, survivor) {
 io.on("connection", (socket) => {
   conns.set(socket.id, {
     socket,
-    guestId: null,
     player: null,
     status: "idle",
     matchId: null,
   });
 
-  socket.on("join", ({ nickname, guestId } = {}) => {
+  // Account required: authenticate the socket with our session token
+  // (obtained from POST /api/auth/google). No guest path.
+  socket.on("auth", ({ token } = {}) => {
     const c = conns.get(socket.id);
     if (!c) return;
-    const name = String(nickname || "").trim().slice(0, 24) || "Anon";
-    const id = guestId && String(guestId).length <= 64
-      ? String(guestId)
-      : crypto.randomUUID();
-    c.guestId = id;
-    c.player = getOrCreatePlayer(id, name);
-    socket.emit("joined", {
-      guestId: id,
-      player: publicPlayer(c.player),
-    });
+    const session = verifySession(token);
+    const row = session?.sub ? getPlayer(session.sub) : null;
+    if (!row) {
+      socket.emit("authError", { message: "Please sign in again." });
+      return;
+    }
+    c.player = row;
+    socket.emit("authed", { player: publicPlayer(row) });
   });
 
   socket.on("queue", () => {
     const c = conns.get(socket.id);
     if (!c?.player) {
-      socket.emit("errorMsg", { message: "Pick a nickname first." });
+      socket.emit("authError", { message: "Sign in to play." });
       return;
     }
     if (c.status === "idle") enqueue(socket.id);
@@ -515,10 +576,10 @@ io.on("connection", (socket) => {
     if (m) onMediaDuration(m, socket.id, ms);
   });
 
-  socket.on("guess", ({ animeId } = {}) => {
+  socket.on("guess", ({ animeId, guessText } = {}) => {
     const c = conns.get(socket.id);
     const m = c?.matchId && matches.get(c.matchId);
-    if (m) handleGuess(m, c, animeId);
+    if (m) handleGuess(m, c, { animeId, guessText });
   });
 
   socket.on("rematchVote", ({ yes } = {}) => {
@@ -526,6 +587,20 @@ io.on("connection", (socket) => {
     const m = c?.matchId && matches.get(c.matchId);
     if (m) onRematchVote(m, c, yes);
   });
+
+  // ---- WebRTC signaling: relay verbatim to the other player in the match
+  // (opt-in camera/mic). The server never inspects media, only forwards SDP
+  // / ICE between exactly the two matched peers.
+  const relayToOpponent = (event, payload) => {
+    const c = conns.get(socket.id);
+    const m = c?.matchId && matches.get(c.matchId);
+    const other = m?.members.find((x) => x !== c);
+    if (other) other.socket.emit(event, payload);
+  };
+  socket.on("rtc:signal", (payload) => relayToOpponent("rtc:signal", payload));
+  socket.on("rtc:state", ({ cam, mic } = {}) =>
+    relayToOpponent("rtc:peerState", { cam: !!cam, mic: !!mic })
+  );
 
   // Voluntarily leave a match (e.g., user clicked "back to queue").
   socket.on("leaveMatch", () => {
@@ -552,7 +627,5 @@ io.on("connection", (socket) => {
 });
 
 server.listen(PORT, () => {
-  console.log(
-    `Anime Opening Elo (multiplayer) listening on http://localhost:${PORT}`
-  );
+  console.log(`Anime Opening Elo (multiplayer) listening on port ${PORT}`);
 });

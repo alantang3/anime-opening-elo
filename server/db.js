@@ -8,10 +8,16 @@
 import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "data");
+// On a host with a persistent disk, set DATA_DIR to the mounted volume path
+// (see render.yaml) so the SQLite file survives redeploys. Defaults to a
+// local ./data dir for development.
+export const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(__dirname, "data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 export const DEFAULT_ELO = 1200;
@@ -42,6 +48,7 @@ db.exec(`
     members    INTEGER,
     score      REAL,
     title      TEXT,
+    titles     TEXT,                            -- JSON: all MAL title variants
     fetched_at TEXT NOT NULL
   );
 
@@ -62,6 +69,22 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_players_elo ON players(elo DESC);
 `);
+
+// Lightweight migrations for DBs created before a column existed.
+// `CREATE TABLE IF NOT EXISTS` won't add columns to an existing table.
+function ensureColumn(table, column, type) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+}
+ensureColumn("mal_popularity", "titles", "TEXT");
+ensureColumn("players", "google_sub", "TEXT"); // Google account id (stable)
+ensureColumn("players", "avatar", "TEXT");
+db.exec(
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_google
+     ON players(google_sub) WHERE google_sub IS NOT NULL`
+);
 
 const nowISO = () => new Date().toISOString();
 
@@ -88,10 +111,25 @@ const stmt = {
   `),
   getPop: db.prepare(`SELECT * FROM mal_popularity WHERE mal_id = ?`),
   upsertPop: db.prepare(`
-    INSERT INTO mal_popularity (mal_id, members, score, title, fetched_at)
-    VALUES (@mal_id, @members, @score, @title, @now)
+    INSERT INTO mal_popularity (mal_id, members, score, title, titles, fetched_at)
+    VALUES (@mal_id, @members, @score, @title, @titles, @now)
     ON CONFLICT(mal_id) DO UPDATE SET
-      members = @members, score = @score, title = @title, fetched_at = @now
+      members = @members, score = @score, title = @title,
+      titles = @titles, fetched_at = @now
+  `),
+  getByGoogle: db.prepare(`SELECT * FROM players WHERE google_sub = ?`),
+  insertGoogle: db.prepare(`
+    INSERT INTO players
+      (id, nickname, elo, created_at, last_seen,
+       email, auth_provider, google_sub, avatar)
+    VALUES
+      (@id, @nickname, @elo, @now, @now,
+       @email, 'google', @google_sub, @avatar)
+  `),
+  touchGoogle: db.prepare(`
+    UPDATE players
+       SET nickname = @nickname, avatar = @avatar, last_seen = @now
+     WHERE id = @id
   `),
   insertMatch: db.prepare(`
     INSERT INTO match_history
@@ -105,17 +143,23 @@ const stmt = {
   `),
 };
 
-// Get an existing player by id, or create one. Always refreshes nickname +
-// last_seen so a returning guest can change their displayed name.
-export function getOrCreatePlayer(id, nickname) {
+// Look up (or create) the account for a verified Google profile, keyed by
+// the stable Google `sub`. Refreshes display name + avatar each sign-in.
+export function getOrCreateGooglePlayer({ sub, name, email, picture }) {
   const now = nowISO();
-  const existing = stmt.getPlayer.get(id);
+  const nickname = String(name || email || "Player").trim().slice(0, 24);
+  const avatar = picture || null;
+  const existing = stmt.getByGoogle.get(sub);
   if (existing) {
-    stmt.touchPlayer.run({ id, nickname, now });
-    return { ...existing, nickname };
+    stmt.touchGoogle.run({ id: existing.id, nickname, avatar, now });
+    return { ...existing, nickname, avatar };
   }
-  stmt.insertPlayer.run({ id, nickname, elo: DEFAULT_ELO, now });
-  return stmt.getPlayer.get(id);
+  const id = crypto.randomUUID();
+  stmt.insertGoogle.run({
+    id, nickname, elo: DEFAULT_ELO, now,
+    email: email || null, google_sub: sub, avatar,
+  });
+  return stmt.getByGoogle.get(sub);
 }
 
 export function getPlayer(id) {
@@ -175,12 +219,13 @@ export function getCachedPopularity(malId) {
   return stmt.getPop.get(malId) || null;
 }
 
-export function cachePopularity({ malId, members, score, title }) {
+export function cachePopularity({ malId, members, score, title, titles }) {
   stmt.upsertPop.run({
     mal_id: malId,
     members: members ?? null,
     score: score ?? null,
     title: title ?? null,
+    titles: titles && titles.length ? JSON.stringify(titles) : null,
     now: nowISO(),
   });
 }
