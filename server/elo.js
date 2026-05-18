@@ -9,14 +9,17 @@
 
 import { ELO_FLOOR } from "./db.js";
 
-export const K_BASE = 32;
-const K_FLOOR_MULT = 0.4; // popular shows still move Elo a little
+// Big, satisfying numbers: an even-match win on a mainstream show is ~+28,
+// a moderate one ~+45, and an obscure or upset win can be +70 to +130. The
+// wide swings also spread ratings across a much larger range over time.
+export const K_BASE = 100;
+const K_FLOOR_MULT = 0.5; // even popular wins move Elo a lot
 
 // Timeout (nobody guessed before the song ended): both players lose a flat,
 // popularity-independent penalty. Kept flat on purpose — scaling it by
 // popularity creates perverse incentives either direction, and the product
 // rule is simply "you both lose points".
-export const TIMEOUT_PENALTY = 12;
+export const TIMEOUT_PENALTY = 20;
 
 const round1 = (x) => Math.round(x * 10) / 10;
 const floor = (elo) => Math.max(ELO_FLOOR, elo);

@@ -20,8 +20,8 @@ export const DATA_DIR = process.env.DATA_DIR
   : path.join(__dirname, "data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-export const DEFAULT_ELO = 1200;
-export const ELO_FLOOR = 100;
+export const DEFAULT_ELO = 100; // everyone starts at the floor
+export const ELO_FLOOR = 100; // and can never drop below it
 
 const db = new Database(path.join(DATA_DIR, "elo.db"));
 db.pragma("journal_mode = WAL"); // better concurrent read/write behavior
@@ -67,7 +67,31 @@ db.exec(`
     duration_ms       INTEGER
   );
 
+  -- Pre-built, ready-to-serve openings. A round picks from here with a
+  -- single local query (zero API calls); a background ingester fills it.
+  CREATE TABLE IF NOT EXISTS openings (
+    anime_id     INTEGER NOT NULL,
+    theme_slug   TEXT NOT NULL,           -- OP1, OP1-EN, …
+    anime_slug   TEXT,
+    anime_name   TEXT,
+    year         INTEGER,
+    song         TEXT,
+    video_link   TEXT NOT NULL,
+    mal_id       INTEGER,
+    members      INTEGER,                 -- MAL members (popularity gate)
+    score        REAL,
+    factor       REAL NOT NULL,           -- 0 popular … 1 obscure
+    franchise    TEXT,
+    franchise_key TEXT,
+    accepted     TEXT,                    -- JSON array of accepted answers
+    dub_label    TEXT,                    -- set when this is an English dub
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (anime_id, theme_slug)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_players_elo ON players(elo DESC);
+  CREATE INDEX IF NOT EXISTS idx_openings_members ON openings(members);
+  CREATE INDEX IF NOT EXISTS idx_openings_factor ON openings(factor);
 `);
 
 // Lightweight migrations for DBs created before a column existed.
@@ -85,6 +109,18 @@ db.exec(
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_google
      ON players(google_sub) WHERE google_sub IS NOT NULL`
 );
+
+// One-time opt-in reset: set RESET_ELO=1 to wipe every existing account's
+// rating/record back to the floor (then remove the env var). Useful after
+// changing the starting Elo so old test accounts aren't stuck at 1200.
+if (process.env.RESET_ELO === "1") {
+  const n = db
+    .prepare(
+      `UPDATE players SET elo = ${DEFAULT_ELO}, wins = 0, losses = 0, draws = 0`
+    )
+    .run().changes;
+  console.log(`RESET_ELO: reset ${n} player(s) to ${DEFAULT_ELO} Elo`);
+}
 
 const nowISO = () => new Date().toISOString();
 
@@ -126,10 +162,15 @@ const stmt = {
       (@id, @nickname, @elo, @now, @now,
        @email, 'google', @google_sub, @avatar)
   `),
+  // Re-login refreshes avatar/email only — NEVER nickname, so a custom
+  // username the player chose isn't overwritten by their Google name.
   touchGoogle: db.prepare(`
     UPDATE players
-       SET nickname = @nickname, avatar = @avatar, last_seen = @now
+       SET avatar = @avatar, email = @email, last_seen = @now
      WHERE id = @id
+  `),
+  setNickname: db.prepare(`
+    UPDATE players SET nickname = @nickname, last_seen = @now WHERE id = @id
   `),
   insertMatch: db.prepare(`
     INSERT INTO match_history
@@ -141,6 +182,35 @@ const stmt = {
        @winner_elo_before, @winner_elo_after, @loser_elo_before,
        @loser_elo_after, @duration_ms)
   `),
+  upsertOpening: db.prepare(`
+    INSERT INTO openings
+      (anime_id, theme_slug, anime_slug, anime_name, year, song, video_link,
+       mal_id, members, score, factor, franchise, franchise_key, accepted,
+       dub_label, updated_at)
+    VALUES
+      (@anime_id, @theme_slug, @anime_slug, @anime_name, @year, @song,
+       @video_link, @mal_id, @members, @score, @factor, @franchise,
+       @franchise_key, @accepted, @dub_label, @now)
+    ON CONFLICT(anime_id, theme_slug) DO UPDATE SET
+      video_link=@video_link, mal_id=@mal_id, members=@members,
+      score=@score, factor=@factor, franchise=@franchise,
+      franchise_key=@franchise_key, accepted=@accepted,
+      dub_label=@dub_label, anime_name=@anime_name, song=@song,
+      year=@year, updated_at=@now
+  `),
+  countOpenings: db.prepare(`SELECT COUNT(*) AS n FROM openings`),
+  // Closest to the difficulty target among shows that clear the members
+  // floor; LIMIT gives a small band we then randomise over for variety.
+  bandByFloor: db.prepare(`
+    SELECT * FROM openings
+     WHERE members >= @minMembers
+     ORDER BY ABS(factor - @target) ASC
+     LIMIT @limit
+  `),
+  // Fallback when nothing clears the floor: the most popular we have.
+  mostPopular: db.prepare(`
+    SELECT * FROM openings ORDER BY members DESC LIMIT @limit
+  `),
 };
 
 // Look up (or create) the account for a verified Google profile, keyed by
@@ -151,8 +221,8 @@ export function getOrCreateGooglePlayer({ sub, name, email, picture }) {
   const avatar = picture || null;
   const existing = stmt.getByGoogle.get(sub);
   if (existing) {
-    stmt.touchGoogle.run({ id: existing.id, nickname, avatar, now });
-    return { ...existing, nickname, avatar };
+    stmt.touchGoogle.run({ id: existing.id, avatar, email: email || null, now });
+    return { ...existing, avatar }; // keep existing.nickname (may be custom)
   }
   const id = crypto.randomUUID();
   stmt.insertGoogle.run({
@@ -160,6 +230,14 @@ export function getOrCreateGooglePlayer({ sub, name, email, picture }) {
     email: email || null, google_sub: sub, avatar,
   });
   return stmt.getByGoogle.get(sub);
+}
+
+// Set a player's chosen display name. Returns the updated row (or null).
+export function setNickname(id, nickname) {
+  const clean = String(nickname || "").replace(/\s+/g, " ").trim().slice(0, 24);
+  if (clean.length < 2) return null;
+  stmt.setNickname.run({ id, nickname: clean, now: nowISO() });
+  return stmt.getPlayer.get(id);
 }
 
 export function getPlayer(id) {
@@ -228,6 +306,58 @@ export function cachePopularity({ malId, members, score, title, titles }) {
     titles: titles && titles.length ? JSON.stringify(titles) : null,
     now: nowISO(),
   });
+}
+
+// ---------- Opening pool ----------
+export function upsertOpening(row) {
+  stmt.upsertOpening.run({
+    anime_id: row.animeId,
+    theme_slug: row.themeSlug,
+    anime_slug: row.animeSlug ?? null,
+    anime_name: row.animeName ?? null,
+    year: row.year ?? null,
+    song: row.song ?? null,
+    video_link: row.videoLink,
+    mal_id: row.malId ?? null,
+    members: Number.isFinite(row.members) ? row.members : null,
+    score: row.score ?? null,
+    factor: row.factor,
+    franchise: row.franchise ?? null,
+    franchise_key: row.franchiseKey ?? null,
+    accepted: row.accepted ? JSON.stringify(row.accepted) : null,
+    dub_label: row.dubLabel ?? null,
+    now: nowISO(),
+  });
+}
+
+export function poolSize() {
+  return stmt.countOpenings.get().n;
+}
+
+// Pick a ready-to-serve opening for the given difficulty. Prefers shows above
+// the members floor closest to `target`, randomised over a small band for
+// variety; relaxes to the most popular pooled show if none clear the floor.
+export function pickPooledOpening({ minMembers, target, band = 25 }) {
+  let rows = stmt.bandByFloor.all({ minMembers, target, limit: band });
+  if (!rows.length) rows = stmt.mostPopular.all({ limit: band });
+  if (!rows.length) return null;
+  const r = rows[Math.floor(Math.random() * rows.length)];
+  return {
+    animeId: r.anime_id,
+    animeName: r.anime_name,
+    animeSlug: r.anime_slug,
+    year: r.year,
+    song: r.song,
+    videoLink: r.video_link,
+    malId: r.mal_id,
+    members: r.members,
+    score: r.score,
+    factor: r.factor,
+    franchise: r.franchise,
+    franchiseKey: r.franchise_key,
+    accepted: r.accepted ? JSON.parse(r.accepted) : [],
+    dubLabel: r.dub_label,
+  };
 }
 
 export default db;

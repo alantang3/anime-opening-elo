@@ -80,7 +80,10 @@ unset). `PORT` is provided by the host. After deploying, add the live
 ## How a round works
 
 1. **Queue** — players join a plain FIFO queue. The two longest-waiting
-   players are paired. Matchmaking does **not** consider Elo.
+   players are paired. Matchmaking does **not** consider Elo. If no human
+   opponent appears within **20s**, you're matched against a **bot** rated
+   near your own Elo (ranked — small swing either way; it auto-accepts
+   rematches, and declining sends you back to the lobby).
 2. **Difficulty selection** — the server averages the two players' Elo and
    picks an opening whose MAL popularity matches that average: low average →
    a popular, easy-to-name show; high average → an obscure deep cut. Only
@@ -96,6 +99,11 @@ unset). `PORT` is provided by the host. After deploying, add the live
    opponent. Anyone declines or leaves → remaining player is requeued.
 
 Disconnecting or forfeiting mid-round counts as a loss; the opponent wins.
+
+**Play a friend:** from the lobby, "Play a friend" creates an invite link
+(`/?invite=CODE`, ~6 chars, 15-min TTL). Whoever opens it (signed in) is
+matched directly against the host. Friend matches are **ranked**, same as
+random. Links are cleaned up if the host leaves/disconnects or it expires.
 
 ### Guessing (franchise-level)
 
@@ -124,16 +132,33 @@ regardless.
 
 ## Elo model
 
-- Everyone starts at **1200**; ratings can't drop below **100**.
-- Standard pairwise Elo with `K = 32`, multiplied by a **popularity factor**
-  (`0.4 + factor`, factor ∈ [0,1], ~1 = obscure): correctly naming an obscure
-  OP is worth ~3× an equally-likely win on a blockbuster.
-- Timeout (nobody guessed): both players lose a flat **12** points.
+- Everyone starts at **100** — the floor. Ratings can never drop below 100,
+  so a new/struggling player can only climb.
+- Standard pairwise Elo with `K = 100`, multiplied by a **popularity factor**
+  (`0.5 + factor`, factor ∈ [0,1], ~1 = obscure). Deliberately swingy for big,
+  motivating numbers: an even-match win is ≈ **+28** (mainstream), **+45**
+  (moderate), **+70** (obscure); upsets reach +130. Ratings spread over a
+  wide range fast.
+- Timeout (nobody guessed): both players lose a flat **20** points.
+- **Difficulty is calibrated to the 100 base:** at/near 100 you're served
+  genuinely mainstream, household-name shows; difficulty ramps with Elo and
+  only strong players reach obscure deep cuts. Low Elo additionally enforces
+  a *hard* minimum MAL member count (`minMembersForElo`) that drops off with
+  every bit of Elo: **1,000,000 at Elo 100** (top ~500 shows already have
+  >500k incl. ones casuals don't know, so the floor is set well above that),
+  decreasing linearly with Elo and reaching **0 only at Elo 4000** (so Elo
+  3000 still has a real ~256k floor). The Elo thresholds are set high to
+  match the larger per-win gains, so it's a long climb before the floor is
+  gone. Selection picks the show above the floor closest to the target; if
+  none clear it, the most popular available — never an obscure one.
 - Because difficulty *and* reward both scale with obscurity, high-rated
   players face harder songs but those wins are also worth the most.
 
-All Elo constants live in `server/elo.js`; the Elo→difficulty curve lives in
-`server/popularity.js` (`targetFactorForElo`, `EASY_ELO`/`HARD_ELO`).
+All Elo constants live in `server/elo.js`; the Elo→difficulty curve and the
+mainstream floor live in `server/popularity.js` (`targetFactorForElo`,
+`minMembersForElo`, `EASY_ELO`/`HARD_ELO`); selection logic in
+`server/selectOpening.js`. Set env `RESET_ELO=1` once to reset all existing
+accounts to 100 (then remove it).
 
 ## API surface
 
@@ -154,6 +179,11 @@ Socket.IO (client → server): `join`, `queue`, `cancelQueue`,
 
 There is **no guest mode** — you sign in with Google and your Elo, record,
 and leaderboard spot are tied to that account.
+
+Your display name defaults to your Google name on first sign-in but is
+**editable** in the lobby (`setNickname`, 2–24 chars, not required to be
+unique). Subsequent Google logins refresh only avatar/email — they never
+overwrite a custom username.
 
 Flow: the browser gets a Google ID token from Google Identity Services and
 POSTs it to `POST /api/auth/google`; the server verifies it (audience =
@@ -198,12 +228,28 @@ profile. Everything persists in the SQLite DB under `DATA_DIR`.
 
 ## Scaling notes
 
-This is a **single Node process** with an in-memory queue and match state —
+**API usage is decoupled from player traffic.** Rounds are served from a
+local **opening pool** (`openings` table): each row is a ready-to-play
+opening (video link, MAL members, popularity factor, franchise, accepted
+answers, dub info). A background **ingester** (`server/pool.js`) trickle-
+fills it from AnimeThemes + Jikan at a slow, rate-limit-safe pace that does
+**not** depend on how many people are playing. Round selection is then a
+single indexed SQLite query — **zero API calls**, instant, and it scales to
+any number of concurrent users (verified with the network fully disabled).
+Live fetching remains only as a cold-start fallback until the pool reaches
+`MIN_POOL` rows. `/api/search` (autocomplete) has a short-TTL + LRU cache,
+collapsing repeated prefix lookups. Jikan popularity is additionally cached
+in SQLite (≈ one lookup per show, ever).
+
+Ingest pace (`server/pool.js`) and `MIN_POOL`/recency (`selectOpening.js`)
+are the dials: faster ingest = richer pool sooner at slightly more upstream
+load; the defaults stay comfortably under AnimeThemes/Jikan limits.
+
+Still a **single Node process** with an in-memory queue and match state —
 fine for a meaningful number of concurrent players. Running multiple
 instances later requires the Socket.IO Redis adapter and moving
-queue/match state into Redis. SQLite (WAL mode) is plenty to start; swap
-`db.js` for Postgres if write volume demands it. Jikan popularity is cached
-in SQLite so it's queried roughly once per show, ever.
+queue/match state into Redis. SQLite (WAL mode) is plenty to start; the
+pool/cache make the upstream APIs a non-issue regardless of traffic.
 
 ## Legality note
 

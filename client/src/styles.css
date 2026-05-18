@@ -245,6 +245,15 @@ button.danger { background: transparent; color: var(--danger); border: 1px solid
 .vs-elo { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .vs-mid { color: var(--muted); font-size: 13px; white-space: nowrap; }
 
+.player-cover.tap-to-play {
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  background: linear-gradient(135deg, #2a2150, #0d0f14);
+}
+.player-cover.tap-to-play:hover { color: var(--accent); }
+
 .player-cover.countdown {
   font-size: 64px;
   font-weight: 800;
@@ -368,6 +377,40 @@ button.danger { background: transparent; color: var(--danger); border: 1px solid
   background: #000;
   object-fit: cover;
   transform: scaleX(-1); /* mirror own preview */
+}
+
+.name-editor {
+  max-width: 360px;
+  margin: 18px auto 0;
+  text-align: left;
+}
+.name-editor label {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.name-row,
+.invite-row {
+  display: flex;
+  gap: 8px;
+}
+.name-row input,
+.invite-row input {
+  flex: 1;
+  min-width: 0;
+}
+.name-row button,
+.invite-row button {
+  flex: none;
+  width: auto;
+  padding: 0 16px;
+}
+.invite-row {
+  max-width: 460px;
+  margin: 16px auto 0;
 }
 
 .volume-row {

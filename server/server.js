@@ -20,10 +20,16 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import { Server } from "socket.io";
 
-import { getPlayer, applyMatchResult, leaderboard } from "./db.js";
+import {
+  getPlayer,
+  applyMatchResult,
+  leaderboard,
+  setNickname,
+} from "./db.js";
 import { searchAnime } from "./animethemes.js";
 import { isCorrect } from "./matching.js";
 import { pickOpeningForElo } from "./selectOpening.js";
+import { startIngester } from "./pool.js";
 import { resolveWin, resolveTimeout } from "./elo.js";
 import {
   GOOGLE_CLIENT_ID,
@@ -39,6 +45,18 @@ const DURATION_MAX_MS = 120_000; // OPs are ~90s; hard cap against a lying clien
 const DURATION_FALLBACK_MS = 90_000; // used if neither client reports in time
 const DURATION_REPORT_WAIT_MS = 8_000;
 const REMATCH_TIMEOUT_MS = 25_000;
+// No human opponent within this long in the random queue → play a bot.
+const BOT_WAIT_MS = Number(process.env.BOT_WAIT_MS) || 20_000;
+const BOT_ELO_JITTER = 40; // bot rating = your Elo ± up to this
+const BOT_BASE_ACCURACY = 0.55; // chance the bot gets it, before popularity
+const INVITE_TTL_MS = 15 * 60 * 1000;
+
+// Plausible player handles — deliberately NOT obviously a bot.
+const BOT_NAMES = [
+  "kuro_92", "hikari", "renji", "aoi_x", "tsubasa", "yukidoke",
+  "kenji", "mirae", "haru", "sora", "rei_", "akira",
+  "nao", "rikuu", "emi_chan", "shinji", "kaze", "yuna",
+];
 
 // ---------- HTTP ----------
 const app = express();
@@ -64,11 +82,28 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
+// Autocomplete is the other per-keystroke AnimeThemes call, so cache it:
+// short TTL + small LRU. Many users type the same prefixes ("nar", "one"…),
+// so this collapses huge numbers of identical lookups into one.
+const searchCache = new Map(); // q -> { at, results }
+const SEARCH_TTL_MS = 10 * 60 * 1000;
+const SEARCH_CACHE_MAX = 500;
+
 app.get("/api/search", async (req, res) => {
+  const q = String(req.query.q || "").trim().toLowerCase();
+  const hit = searchCache.get(q);
+  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) {
+    return res.json({ results: hit.results });
+  }
   try {
-    res.json({ results: await searchAnime(String(req.query.q || "")) });
+    const results = await searchAnime(q);
+    searchCache.set(q, { at: Date.now(), results });
+    if (searchCache.size > SEARCH_CACHE_MAX)
+      searchCache.delete(searchCache.keys().next().value); // evict oldest
+    res.json({ results });
   } catch (err) {
     console.error("search:", err.message);
+    if (hit) return res.json({ results: hit.results }); // serve stale on error
     res.status(502).json({ error: String(err.message || err) });
   }
 });
@@ -104,6 +139,8 @@ const conns = new Map();
 let queue = [];
 // matchId -> Match
 const matches = new Map();
+// invite code -> { hostSocketId, createdAt }
+const invites = new Map();
 
 const snapshot = (row) => ({
   id: row.id,
@@ -127,18 +164,29 @@ function publicPlayer(row) {
 }
 
 // ---------- Matchmaking ----------
+function clearBotTimer(c) {
+  if (c?.botTimer) {
+    clearTimeout(c.botTimer);
+    c.botTimer = null;
+  }
+}
+
 function enqueue(socketId) {
   const c = conns.get(socketId);
   if (!c || c.status !== "idle") return;
   if (!queue.includes(socketId)) queue.push(socketId);
   c.status = "queued";
   c.socket.emit("queued");
+  // No human within BOT_WAIT_MS → drop this player into a bot match.
+  clearBotTimer(c);
+  c.botTimer = setTimeout(() => startBotMatch(socketId), BOT_WAIT_MS);
   tryMatch();
 }
 
 function dequeue(socketId) {
   queue = queue.filter((id) => id !== socketId);
   const c = conns.get(socketId);
+  clearBotTimer(c);
   if (c && c.status === "queued") {
     c.status = "idle";
     c.socket.emit("queueCancelled");
@@ -169,7 +217,8 @@ function createMatch(a, b) {
   const id = crypto.randomUUID();
   const match = {
     id,
-    members: [a, b], // connection contexts
+    members: [a, b], // connection contexts (one may be a bot)
+    bot: [a, b].find((m) => m.isBot) || null,
     state: "preparing", // preparing | countdown | playing | result | rematch
     round: 0,
     opening: null,
@@ -184,6 +233,8 @@ function createMatch(a, b) {
   matches.set(id, match);
 
   for (const c of match.members) {
+    clearBotTimer(c);
+    queue = queue.filter((qid) => qid !== c.socket.id);
     c.status = "match";
     c.matchId = id;
     c.socket.join(id);
@@ -268,8 +319,9 @@ function onMediaDuration(match, socketId, ms) {
   if (!match || match.state !== "preparing") return;
   const v = Number(ms);
   if (Number.isFinite(v) && v > 0) match.reported.set(socketId, v);
-  // Once both clients have reported, start without waiting out the timer.
-  if (match.reported.size >= match.members.length) {
+  // Once every HUMAN has reported, start (a bot never reports).
+  const humans = match.members.filter((m) => !m.isBot).length;
+  if (match.reported.size >= humans) {
     clearTimeout(match.timers.report);
     beginCountdown(match);
   }
@@ -303,6 +355,7 @@ function beginCountdown(match) {
       () => onRoundTimeout(match),
       match.durationMs
     );
+    if (match.bot) scheduleBotPlay(match);
   }, COUNTDOWN_MS);
 }
 
@@ -439,9 +492,20 @@ function beginRematch(match) {
   match.disconnectForfeit = false;
   match.rematchVotes.clear();
   emitRematchState(match);
+  // The bot decides 50/50 after a short, human-like delay (reusing the same
+  // vote path: "no" dissolves like a real decline, "yes" needs the human too).
+  if (match.bot) {
+    match.timers.botVote = setTimeout(() => {
+      if (matches.has(match.id) && match.state === "rematch")
+        onRematchVote(match, match.bot, Math.random() < 0.5);
+    }, 1200 + Math.random() * 2500);
+  }
   match.timers.rematch = setTimeout(() => {
-    // Treat no-decision as "no".
-    dissolveMatch(match, { requeue: true, reason: "rematch_timeout" });
+    // Treat no-decision as "no". Bot matches don't re-queue (back to lobby).
+    dissolveMatch(match, {
+      requeue: !match.bot,
+      reason: "rematch_timeout",
+    });
   }, REMATCH_TIMEOUT_MS);
 }
 
@@ -460,7 +524,7 @@ function onRematchVote(match, conn, yes) {
   match.rematchVotes.set(conn.socket.id, !!yes);
 
   if (!yes) {
-    dissolveMatch(match, { requeue: true, reason: "declined" });
+    dissolveMatch(match, { requeue: !match.bot, reason: "declined" });
     return;
   }
   emitRematchState(match);
@@ -486,6 +550,7 @@ function dissolveMatch(match, { requeue = false, reason } = {}, leaverId) {
   matches.delete(match.id);
 
   for (const c of match.members) {
+    if (c.isBot) continue; // bot has no socket/state to clean up
     c.socket.leave(match.id);
     c.matchId = null;
     c.status = "idle";
@@ -535,6 +600,111 @@ function finalizeAfterForfeit(match, survivor) {
   enqueue(survivor.socket.id);
 }
 
+// ---------- Bot opponent ----------
+const clamp01 = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+
+function makeBotConn(humanConn) {
+  const base = freshSnapshot(humanConn).eloRaw;
+  const elo = Math.max(
+    100,
+    Math.round(base + (Math.random() * 2 - 1) * BOT_ELO_JITTER)
+  );
+  const noop = () => {};
+  return {
+    socket: {
+      id: "botsock:" + crypto.randomUUID(),
+      emit: noop,
+      join: noop,
+      leave: noop,
+      to: () => ({ emit: noop }),
+    },
+    player: {
+      id: "bot:" + crypto.randomUUID(),
+      nickname: BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)],
+      elo,
+      wins: 0,
+      losses: 0,
+      draws: 0,
+      avatar: null,
+    },
+    status: "match",
+    matchId: null,
+    isBot: true,
+  };
+}
+
+function startBotMatch(socketId) {
+  const c = conns.get(socketId);
+  if (!c || c.status !== "queued") return;
+  queue = queue.filter((id) => id !== socketId);
+  clearBotTimer(c);
+  createMatch(c, makeBotConn(c));
+}
+
+// The bot "plays": with popularity-adjusted accuracy it submits a correct
+// guess at a random moment; otherwise it stays quiet (and may fake a miss
+// for tension). Bot rating ≈ the player's Elo, so the match is ranked but
+// the swing is small either way.
+function scheduleBotPlay(match) {
+  const bot = match.bot;
+  if (!bot || match.state !== "playing") return;
+  const pop = match.popularity?.factor ?? 0.5;
+  const accuracy = clamp01(
+    BOT_BASE_ACCURACY + (0.5 - pop) * 0.5,
+    0.15,
+    0.9
+  );
+  const dur = match.durationMs || 90_000;
+  if (Math.random() < accuracy) {
+    const delay = 2500 + Math.random() * (dur * 0.85 - 2500);
+    match.timers.bot = setTimeout(() => {
+      if (matches.has(match.id) && match.state === "playing")
+        settleWin(match, bot);
+    }, Math.max(2000, delay));
+  } else if (Math.random() < 0.6) {
+    const delay = 3000 + Math.random() * (dur * 0.7);
+    match.timers.bot = setTimeout(() => {
+      if (matches.has(match.id) && match.state === "playing")
+        for (const m of match.members)
+          if (!m.isBot) m.socket.emit("opponent:guessed", { correct: false });
+    }, delay);
+  }
+}
+
+// ---------- Invite (private friend match) ----------
+function genInviteCode() {
+  const A = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  let code;
+  do {
+    code = Array.from(
+      { length: 6 },
+      () => A[Math.floor(Math.random() * A.length)]
+    ).join("");
+  } while (invites.has(code));
+  return code;
+}
+
+function removeInvitesBy(socketId) {
+  for (const [code, rec] of invites)
+    if (rec.hostSocketId === socketId) invites.delete(code);
+  const c = conns.get(socketId);
+  if (c && c.status === "inviting") c.status = "idle";
+}
+
+// Drop stale invites so a host who wandered off doesn't leave a dead link.
+setInterval(() => {
+  const cutoff = Date.now() - INVITE_TTL_MS;
+  for (const [code, rec] of invites)
+    if (rec.createdAt < cutoff) {
+      invites.delete(code);
+      const h = conns.get(rec.hostSocketId);
+      if (h && h.status === "inviting") {
+        h.status = "idle";
+        h.socket.emit("inviteExpired");
+      }
+    }
+}, 60_000).unref?.();
+
 // ---------- Socket wiring ----------
 io.on("connection", (socket) => {
   conns.set(socket.id, {
@@ -559,16 +729,88 @@ io.on("connection", (socket) => {
     socket.emit("authed", { player: publicPlayer(row) });
   });
 
+  // Set a custom display name (persists to the account).
+  socket.on("setNickname", ({ nickname } = {}) => {
+    const c = conns.get(socket.id);
+    if (!c?.player) {
+      socket.emit("authError", { message: "Sign in first." });
+      return;
+    }
+    const row = setNickname(c.player.id, nickname);
+    if (!row) {
+      socket.emit("nicknameError", {
+        message: "Name must be 2–24 characters.",
+      });
+      return;
+    }
+    c.player = row;
+    socket.emit("profileUpdated", { player: publicPlayer(row) });
+  });
+
   socket.on("queue", () => {
     const c = conns.get(socket.id);
     if (!c?.player) {
       socket.emit("authError", { message: "Sign in to play." });
       return;
     }
+    if (c.status === "inviting") removeInvitesBy(socket.id);
     if (c.status === "idle") enqueue(socket.id);
   });
 
   socket.on("cancelQueue", () => dequeue(socket.id));
+
+  // ---- Private friend match via invite link (ranked) ----
+  socket.on("createInvite", () => {
+    const c = conns.get(socket.id);
+    if (!c?.player) {
+      socket.emit("authError", { message: "Sign in first." });
+      return;
+    }
+    if (c.status === "queued") dequeue(socket.id);
+    if (c.status !== "idle") {
+      socket.emit("inviteError", { message: "Finish your current match first." });
+      return;
+    }
+    removeInvitesBy(socket.id);
+    const code = genInviteCode();
+    invites.set(code, { hostSocketId: socket.id, createdAt: Date.now() });
+    c.status = "inviting";
+    socket.emit("inviteCreated", { code });
+  });
+
+  socket.on("cancelInvite", () => {
+    removeInvitesBy(socket.id);
+    socket.emit("inviteCancelled");
+  });
+
+  socket.on("joinInvite", ({ code } = {}) => {
+    const c = conns.get(socket.id);
+    if (!c?.player) {
+      socket.emit("authError", { message: "Sign in to play." });
+      return;
+    }
+    if (c.status === "queued") dequeue(socket.id);
+    if (c.status === "inviting") removeInvitesBy(socket.id);
+    if (c.status !== "idle") {
+      socket.emit("inviteError", { message: "Finish your current match first." });
+      return;
+    }
+    const rec = invites.get(String(code || "").toUpperCase());
+    const host = rec && conns.get(rec.hostSocketId);
+    if (!rec || !host || host.status !== "inviting") {
+      socket.emit("inviteError", {
+        message: "That invite link is invalid or expired.",
+      });
+      return;
+    }
+    if (host.socket.id === socket.id) {
+      socket.emit("inviteError", { message: "You can't join your own invite." });
+      return;
+    }
+    invites.delete(String(code).toUpperCase());
+    removeInvitesBy(host.socket.id);
+    createMatch(host, c);
+  });
 
   socket.on("mediaDuration", ({ ms } = {}) => {
     const c = conns.get(socket.id);
@@ -620,6 +862,7 @@ io.on("connection", (socket) => {
     const c = conns.get(socket.id);
     if (!c) return;
     dequeue(socket.id);
+    removeInvitesBy(socket.id);
     const m = c.matchId && matches.get(c.matchId);
     if (m) handleDisconnectDuringMatch(m, c);
     conns.delete(socket.id);
@@ -628,4 +871,5 @@ io.on("connection", (socket) => {
 
 server.listen(PORT, () => {
   console.log(`Anime Opening Elo (multiplayer) listening on port ${PORT}`);
+  startIngester(); // trickle-fill the opening pool in the background
 });

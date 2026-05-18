@@ -3,8 +3,9 @@ import { io } from "socket.io-client";
 
 // Screen phases. AUTH/LOBBY are local; the rest are driven by server events.
 const PHASE = {
-  AUTH: "auth",       // not signed in
-  LOBBY: "lobby",     // signed in, idle
+  AUTH: "auth",         // not signed in
+  LOBBY: "lobby",       // signed in, idle
+  INVITING: "inviting", // waiting for a friend to join your link
   QUEUE: "queue",
   PREPARE: "prepare",
   COUNTDOWN: "countdown",
@@ -34,11 +35,19 @@ export default function App() {
   const [countdown, setCountdown] = useState(0);
   const [remaining, setRemaining] = useState(1);
   const [feedback, setFeedback] = useState(null);
+  const [needTap, setNeedTap] = useState(false); // autoplay was blocked
   const [oppStatus, setOppStatus] = useState(null);
   const [result, setResult] = useState(null);
   const [votes, setVotes] = useState({ you: null, opponent: null });
   const [notice, setNotice] = useState(null);
   const [board, setBoard] = useState([]);
+  const [inviteCode, setInviteCode] = useState(null);
+  const [nameDraft, setNameDraft] = useState("");
+  const [copied, setCopied] = useState(false);
+  // Invite code from a ?invite= link, joined once we're authed.
+  const pendingInviteRef = useRef(
+    new URLSearchParams(window.location.search).get("invite")
+  );
 
   // Guess autocomplete
   const [query, setQuery] = useState("");
@@ -62,6 +71,10 @@ export default function App() {
   const politeRef = useRef(false);
   const makingOfferRef = useRef(false);
   const ignoreOfferRef = useRef(false);
+  const audioSenderRef = useRef(null); // persistent senders → toggle via
+  const videoSenderRef = useRef(null); // replaceTrack (no renegotiation)
+  const remoteStreamRef = useRef(null);
+  const pendingIceRef = useRef([]); // ICE buffered until remoteDescription set
   const [camOn, setCamOn] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [hasRemote, setHasRemote] = useState(false);
@@ -87,6 +100,13 @@ export default function App() {
       setPhase((p) =>
         p === PHASE.AUTH || p === PHASE.QUEUE ? PHASE.LOBBY : p
       );
+      // If we arrived via a ?invite= link, join that private match now.
+      const code = pendingInviteRef.current;
+      if (code) {
+        pendingInviteRef.current = null;
+        window.history.replaceState({}, "", window.location.pathname);
+        socket.emit("joinInvite", { code });
+      }
     });
     socket.on("authError", ({ message }) => {
       localStorage.removeItem(LS_TOKEN);
@@ -126,6 +146,7 @@ export default function App() {
       setQuery("");
       setOptions([]);
       setPicked(null);
+      setNeedTap(false);
       setRoundInfo({ round, videoUrl, dub: dub || null, durationMs: null });
       setPhase(PHASE.PREPARE);
     });
@@ -182,11 +203,41 @@ export default function App() {
     });
     socket.on("match:over", ({ reason }) => {
       teardownRTC();
-      if (reason === "you_left") setPhase(PHASE.LOBBY);
-      else setNotice("Match ended. Finding a new opponent…");
+      // Back to the lobby by default. If the server re-queued us (random
+      // rematch decline), the "queued" event will switch us to QUEUE.
+      setPhase(PHASE.LOBBY);
+      if (reason && reason !== "you_left")
+        setNotice("Match ended.");
     });
 
     socket.on("errorMsg", ({ message }) => setNotice(message));
+
+    // Profile / username
+    socket.on("profileUpdated", ({ player }) => {
+      setMe(player);
+      setNotice("Username updated.");
+    });
+    socket.on("nicknameError", ({ message }) => setNotice(message));
+
+    // Invite (private friend match)
+    socket.on("inviteCreated", ({ code }) => {
+      setInviteCode(code);
+      setPhase(PHASE.INVITING);
+    });
+    socket.on("inviteCancelled", () => {
+      setInviteCode(null);
+      setPhase(PHASE.LOBBY);
+    });
+    socket.on("inviteExpired", () => {
+      setInviteCode(null);
+      setNotice("Your invite link expired.");
+      setPhase(PHASE.LOBBY);
+    });
+    socket.on("inviteError", ({ message }) => {
+      setInviteCode(null);
+      setNotice(message);
+      setPhase(PHASE.LOBBY);
+    });
 
     // WebRTC signaling (perfect negotiation).
     socket.on("rtc:signal", (payload) => onSignal(payload));
@@ -273,7 +324,12 @@ export default function App() {
     if (v) {
       v.volume = volume;
       v.currentTime = 0;
-      v.play().catch(() => {});
+      // If the browser blocks autoplay (gesture window elapsed during the
+      // countdown), surface a one-tap fallback instead of failing silently.
+      v.play().then(
+        () => setNeedTap(false),
+        () => setNeedTap(true)
+      );
     }
     setTimeout(() => inputRef.current?.focus(), 50);
     clearInterval(tickRef.current);
@@ -283,6 +339,15 @@ export default function App() {
       setRemaining(Math.max(0, frac));
       if (frac <= 0) clearInterval(tickRef.current);
     }, 100);
+  }
+  function tapToPlay() {
+    const v = videoRef.current;
+    if (!v) return;
+    v.volume = volume;
+    v.play().then(
+      () => setNeedTap(false),
+      () => {}
+    );
   }
   function stopTimer() {
     clearInterval(tickRef.current);
@@ -322,6 +387,20 @@ export default function App() {
     if (pcRef.current) return pcRef.current;
     const pc = new RTCPeerConnection({ iceServers: STUN });
     pcRef.current = pc;
+    pendingIceRef.current = [];
+
+    // Persistent bidirectional transceivers, created ONCE. Toggling cam/mic
+    // later only calls replaceTrack on these senders — no renegotiation, so
+    // no glare and no one-way-media bug.
+    audioSenderRef.current = pc.addTransceiver("audio", {
+      direction: "sendrecv",
+    }).sender;
+    videoSenderRef.current = pc.addTransceiver("video", {
+      direction: "sendrecv",
+    }).sender;
+
+    const remote = new MediaStream();
+    remoteStreamRef.current = remote;
 
     pc.onnegotiationneeded = async () => {
       try {
@@ -337,13 +416,15 @@ export default function App() {
       }
     };
     pc.onicecandidate = ({ candidate }) => {
-      if (candidate)
-        socketRef.current?.emit("rtc:signal", { candidate });
+      if (candidate) socketRef.current?.emit("rtc:signal", { candidate });
     };
-    pc.ontrack = ({ streams }) => {
-      if (remoteVideoRef.current && streams[0]) {
-        remoteVideoRef.current.srcObject = streams[0];
-      }
+    pc.ontrack = ({ track }) => {
+      remote.addTrack(track);
+      if (
+        remoteVideoRef.current &&
+        remoteVideoRef.current.srcObject !== remote
+      )
+        remoteVideoRef.current.srcObject = remote;
       setHasRemote(true);
     };
     pc.onconnectionstatechange = () => {
@@ -363,6 +444,14 @@ export default function App() {
         ignoreOfferRef.current = !politeRef.current && offerCollision;
         if (ignoreOfferRef.current) return;
         await pc.setRemoteDescription(description);
+        // Flush ICE that arrived before the remote description was set.
+        const buffered = pendingIceRef.current;
+        pendingIceRef.current = [];
+        for (const c of buffered) {
+          try {
+            await pc.addIceCandidate(c);
+          } catch {}
+        }
         if (description.type === "offer") {
           await pc.setLocalDescription();
           socketRef.current?.emit("rtc:signal", {
@@ -370,10 +459,14 @@ export default function App() {
           });
         }
       } else if (candidate) {
-        try {
-          await pc.addIceCandidate(candidate);
-        } catch (e) {
-          if (!ignoreOfferRef.current) throw e;
+        if (!pc.remoteDescription || !pc.remoteDescription.type) {
+          pendingIceRef.current.push(candidate); // not ready yet — buffer it
+        } else {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (e) {
+            if (!ignoreOfferRef.current) console.error("ice", e);
+          }
         }
       }
     } catch (e) {
@@ -382,30 +475,28 @@ export default function App() {
   }
 
   async function applyMedia(nextCam, nextMic) {
-    const pc = ensurePeer();
+    ensurePeer();
     try {
-      // Drop any current local tracks/senders.
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
         localStreamRef.current = null;
       }
-      pc.getSenders().forEach((s) => {
-        if (s.track) {
-          try {
-            pc.removeTrack(s);
-          } catch {}
-        }
-      });
-
       let stream = null;
       if (nextCam || nextMic) {
         stream = await navigator.mediaDevices.getUserMedia({
           video: nextCam,
           audio: nextMic,
         });
-        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
       }
       localStreamRef.current = stream;
+      // replaceTrack swaps what we send WITHOUT renegotiation — this is the
+      // whole reason there's no more one-way-audio glare.
+      await audioSenderRef.current?.replaceTrack(
+        stream?.getAudioTracks()[0] || null
+      );
+      await videoSenderRef.current?.replaceTrack(
+        stream?.getVideoTracks()[0] || null
+      );
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       setCamOn(nextCam);
       setMicOn(nextMic);
@@ -428,6 +519,10 @@ export default function App() {
       pcRef.current?.close();
     } catch {}
     pcRef.current = null;
+    audioSenderRef.current = null;
+    videoSenderRef.current = null;
+    remoteStreamRef.current = null;
+    pendingIceRef.current = [];
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     makingOfferRef.current = false;
@@ -487,6 +582,24 @@ export default function App() {
   const cancelQueue = () => socketRef.current?.emit("cancelQueue");
   const leaveMatch = () => socketRef.current?.emit("leaveMatch");
   const vote = (yes) => socketRef.current?.emit("rematchVote", { yes });
+  const createInvite = () => socketRef.current?.emit("createInvite");
+  const cancelInvite = () => socketRef.current?.emit("cancelInvite");
+  const saveName = () => {
+    const n = nameDraft.trim();
+    if (n && n !== me?.nickname) socketRef.current?.emit("setNickname", { nickname: n });
+  };
+  const inviteUrl = inviteCode
+    ? `${window.location.origin}/?invite=${inviteCode}`
+    : "";
+  function copyInvite() {
+    navigator.clipboard?.writeText(inviteUrl).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {}
+    );
+  }
 
   async function refreshBoard() {
     try {
@@ -497,6 +610,11 @@ export default function App() {
   useEffect(() => {
     refreshBoard();
   }, []);
+
+  // Keep the username editor prefilled with the current name.
+  useEffect(() => {
+    if (me?.nickname) setNameDraft(me.nickname);
+  }, [me?.nickname]);
 
   const inMatch =
     phase === PHASE.PREPARE ||
@@ -519,7 +637,7 @@ export default function App() {
         <div className="title-wrap">
           <img src="/anitune.png" alt="AniTune" className="app-icon" />
           <div className="title">
-            ani<span>tune</span>
+            Ani<span>Tune</span>
           </div>
         </div>
         {me && (
@@ -563,16 +681,76 @@ export default function App() {
 
         {/* ---------- Lobby ---------- */}
         {phase === PHASE.LOBBY && (
-          <div style={{ textAlign: "center", padding: "32px 0" }}>
+          <div style={{ textAlign: "center", padding: "28px 0" }}>
             <p style={{ marginTop: 0 }}>
               Welcome back, <strong>{me?.nickname}</strong>.
             </p>
-            <p style={{ color: "var(--muted)" }}>
-              Obscure shows are worth far more Elo than popular ones.
+
+            <div className="name-editor">
+              <label>Username</label>
+              <div className="name-row">
+                <input
+                  type="text"
+                  value={nameDraft}
+                  maxLength={24}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && saveName()}
+                  placeholder="Display name"
+                />
+                <button
+                  className="secondary"
+                  onClick={saveName}
+                  disabled={
+                    !nameDraft.trim() || nameDraft.trim() === me?.nickname
+                  }
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+
+            <p style={{ color: "var(--muted)", marginTop: 20 }}>
+              Obscure shows are worth far more Elo than popular ones. No
+              opponent in 20s? You’ll play a bot near your rating.
             </p>
-            <div className="button-row" style={{ maxWidth: 240, margin: "16px auto 0" }}>
+            <div
+              className="button-row"
+              style={{ maxWidth: 360, margin: "16px auto 0" }}
+            >
               <button onClick={findMatch} disabled={!connected}>
                 {connected ? "Find a match" : "Connecting…"}
+              </button>
+              <button
+                className="secondary"
+                onClick={createInvite}
+                disabled={!connected}
+              >
+                Play a friend
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ---------- Inviting a friend ---------- */}
+        {phase === PHASE.INVITING && (
+          <div style={{ textAlign: "center", padding: "32px 0" }}>
+            <div className="pulse">Waiting for your friend to join…</div>
+            <p style={{ color: "var(--muted)", marginTop: 16 }}>
+              Send them this link — first to open it (signed in) battles you.
+              Ranked.
+            </p>
+            <div className="invite-row">
+              <input type="text" readOnly value={inviteUrl} onFocus={(e) => e.target.select()} />
+              <button className="secondary" onClick={copyInvite}>
+                {copied ? "Copied!" : "Copy"}
+              </button>
+            </div>
+            <div
+              className="button-row"
+              style={{ maxWidth: 220, margin: "20px auto 0" }}
+            >
+              <button className="danger" onClick={cancelInvite}>
+                Cancel
               </button>
             </div>
           </div>
@@ -609,6 +787,12 @@ export default function App() {
                 playsInline
                 controls={phase === PHASE.RESULT}
                 onLoadedMetadata={onLoadedMetadata}
+                onError={() =>
+                  roundInfo?.videoUrl &&
+                  setNotice(
+                    "Couldn't load this opening (network/CDN). Skipping…"
+                  )
+                }
                 style={{
                   visibility: phase === PHASE.RESULT ? "visible" : "hidden",
                 }}
@@ -621,7 +805,16 @@ export default function App() {
                   {countdown > 0 ? countdown : "GO!"}
                 </div>
               )}
-              {phase === PHASE.PLAYING && (
+              {phase === PHASE.PLAYING && needTap && (
+                <div
+                  className="player-cover tap-to-play"
+                  onClick={tapToPlay}
+                  role="button"
+                >
+                  🔊 Tap to start the song
+                </div>
+              )}
+              {phase === PHASE.PLAYING && !needTap && (
                 <div className="player-cover">
                   ▶ audio playing — name the anime
                   {roundInfo?.dub && (

@@ -18,9 +18,19 @@ import {
   getAnimeDetail,
   getOpeningThemes,
 } from "./animethemes.js";
-import { getPopularity, targetFactorForElo } from "./popularity.js";
+import {
+  getPopularity,
+  targetFactorForElo,
+  minMembersForElo,
+} from "./popularity.js";
 import { buildAcceptedAnswers } from "./matching.js";
 import { dubFranchiseFor, isEnglishDub } from "./dubOverrides.js";
+import { pickPooledOpening, poolSize } from "./db.js";
+
+// Once the pool has at least this many rows, rounds are served entirely from
+// it (zero API calls). Below it (cold start) we fall back to live fetching.
+const MIN_POOL = 60;
+const recent = []; // last few anime_ids served, to reduce repeats
 
 // Pokémon / Digimon Adventure play an English ("-EN") opening: ANY of the
 // show's English OPs is picked at random. If the show has no English OP at
@@ -38,10 +48,11 @@ export async function resolveVideo(e) {
   return { link: e.video?.link, dub: null }; // no English OP → Japanese
 }
 
-const PAGE_SIZE = 20;     // candidates fetched per round (1 AnimeThemes call)
-const MAX_EVAL = 12;      // hard cap on detail/popularity lookups per round
+const PAGE_SIZE = 25;     // candidates fetched per random page (1 API call)
+const MAX_PAGES = 3;      // extra random pages if we can't find a mainstream one
+const MAX_EVAL = 21;      // hard cap on detail/popularity lookups per round
 const BATCH = 3;          // concurrent lookups (gentle on Jikan rate limits)
-const TOLERANCE = 0.12;   // |factor - target| within this ⇒ accept early
+const TOLERANCE = 0.1;    // |factor - target| within this ⇒ accept early
 
 // One AnimeThemes detail call (series + synonyms + MAL id) + one Jikan call
 // (popularity + title variants). Both are cached, so this gets cheap.
@@ -88,39 +99,124 @@ async function enrich(e, target, chosenFactor) {
  */
 export async function pickOpeningForElo(avgElo) {
   const target = targetFactorForElo(avgElo);
-  const candidates = await getOpeningCandidates(PAGE_SIZE);
+  const minMembers = minMembersForElo(avgElo); // hard mainstream floor (low Elo)
 
-  let best = null; // { ...evaluated, dist }
-  const pool = candidates.slice(0, MAX_EVAL);
-
-  for (let i = 0; i < pool.length && !withinTolerance(best); i += BATCH) {
-    const slice = pool.slice(i, i + BATCH);
-    const evaluated = await Promise.all(
-      slice.map((c) => evaluate(c).catch(() => null))
-    );
-    for (const e of evaluated) {
-      if (!e) continue;
-      const dist = Math.abs(e.factor - target);
-      if (!best || dist < best.dist) best = { ...e, dist };
-      if (dist <= TOLERANCE) break;
+  // Fast path: serve from the local pool — zero API calls, scales freely.
+  if (poolSize() >= MIN_POOL) {
+    let row = null;
+    for (let i = 0; i < 6; i++) {
+      const r = pickPooledOpening({ minMembers, target });
+      if (!r) break;
+      row = r;
+      if (!recent.includes(r.animeId)) break; // prefer something not recent
+    }
+    if (row) {
+      recent.push(row.animeId);
+      if (recent.length > 40) recent.shift();
+      return {
+        anime: {
+          id: row.animeId,
+          name: row.animeName,
+          slug: row.animeSlug,
+          year: row.year,
+        },
+        song: row.song ? { title: row.song } : null,
+        theme: null,
+        video: { link: row.videoLink },
+        malId: row.malId,
+        popularity: {
+          members: row.members,
+          score: row.score,
+          factor: row.factor,
+        },
+        accepted: row.accepted || [],
+        franchiseKey: row.franchiseKey,
+        franchise: row.franchise,
+        dub: row.dubLabel ? { label: row.dubLabel } : null,
+        targetFactor: round2(target),
+        chosenFactor: round2(row.factor),
+      };
     }
   }
 
-  if (best) return enrich(best, target, best.factor);
+  // Cold-start fallback: live fetch (the original path) until the ingester
+  // has filled the pool.
+  const evaluated = [];
+  let firstCandidate = null;
+  let accepted = null; // a qualifying candidate close to target → stop early
+
+  // Pull random pages until we find a mainstream-enough opening near the
+  // target, or run out of pages / our evaluation budget. AnimeThemes is
+  // obscure-skewed, so one page often has no popular show — hence the retry.
+  for (let page = 0; page < MAX_PAGES && !accepted; page++) {
+    let candidates;
+    try {
+      candidates = await getOpeningCandidates(PAGE_SIZE);
+    } catch {
+      break;
+    }
+    if (!firstCandidate && candidates[0]) firstCandidate = candidates[0];
+
+    const pool = candidates.slice(0, MAX_EVAL - evaluated.length);
+    for (let i = 0; i < pool.length && !accepted; i += BATCH) {
+      const slice = pool.slice(i, i + BATCH);
+      const got = await Promise.all(
+        slice.map((c) => evaluate(c).catch(() => null))
+      );
+      for (const e of got) {
+        if (!e) continue;
+        evaluated.push(e);
+        const mainstreamEnough =
+          minMembers === 0 ||
+          (Number.isFinite(e.popularity?.members) &&
+            e.popularity.members >= minMembers);
+        if (mainstreamEnough && Math.abs(e.factor - target) <= TOLERANCE) {
+          accepted = e;
+          break;
+        }
+      }
+      if (evaluated.length >= MAX_EVAL) break;
+    }
+  }
+
+  const chosen = chooseBest(evaluated, target, minMembers, accepted);
+  if (chosen) return enrich(chosen, target, chosen.factor);
 
   // Nothing could be evaluated (AnimeThemes/Jikan all failing): fall back to
   // the first candidate so a round can still start.
-  const c = candidates[0];
-  const detail = await getAnimeDetail(c.anime.slug).catch(() => ({}));
+  if (!firstCandidate) throw new Error("no openings available");
+  const detail = await getAnimeDetail(firstCandidate.anime.slug).catch(() => ({}));
   const popularity = await getPopularity(detail.malId);
   return enrich(
-    { ...c, detail, malId: detail.malId, popularity },
+    { ...firstCandidate, detail, malId: detail.malId, popularity },
     target,
     null
   );
 }
 
-function withinTolerance(best) {
-  return best && best.dist <= TOLERANCE;
+// Prefer candidates that clear the mainstream members floor, and among those
+// the one closest to the difficulty target. If NONE clear the floor (a
+// low-Elo player and every page was too obscure), serve the single most
+// popular show we saw — never an obscure one.
+function chooseBest(evaluated, target, minMembers, accepted) {
+  if (accepted) return accepted;
+  if (!evaluated.length) return null;
+
+  const qualifying =
+    minMembers === 0
+      ? evaluated
+      : evaluated.filter(
+          (e) =>
+            Number.isFinite(e.popularity?.members) &&
+            e.popularity.members >= minMembers
+        );
+
+  if (qualifying.length) {
+    return qualifying.reduce((b, e) =>
+      Math.abs(e.factor - target) < Math.abs(b.factor - target) ? e : b
+    );
+  }
+  // Couldn't meet the floor → the most popular thing we found (min factor).
+  return evaluated.reduce((b, e) => (e.factor < b.factor ? e : b));
 }
 const round2 = (x) => Math.round(x * 100) / 100;
