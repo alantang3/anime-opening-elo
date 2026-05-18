@@ -519,7 +519,7 @@ export default function App() {
         <div className="title-wrap">
           <img src="/anitune.png" alt="AniTune" className="app-icon" />
           <div className="title">
-            Guess the Anime <span>OP</span>
+            ani<span>tune</span>
           </div>
         </div>
         {me && (

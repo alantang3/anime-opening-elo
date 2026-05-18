@@ -25,10 +25,10 @@ services:
         value: "22.20.0"
       - key: DATA_DIR
         value: /var/data
-      # Required for Google sign-in. Set this in the Render dashboard
-      # (Environment) — paste the OAuth Web client ID from Google Cloud.
+      # Google OAuth Web client ID. Not a secret (it ships to every browser
+      # and is origin-restricted to your domains), so keeping it here is fine.
       - key: GOOGLE_CLIENT_ID
-        sync: false
+        value: 657498565875-34hionbg133e8t7ggj1v5u1t95htjec5.apps.googleusercontent.com
       # Optional: auto-generated into DATA_DIR if left unset.
       - key: SESSION_SECRET
         sync: false
