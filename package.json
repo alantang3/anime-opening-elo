@@ -1,0 +1,13 @@
+{
+  "name": "anime-opening-elo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --names \"server,client\" --prefix-colors \"cyan,magenta\" \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "start": "concurrently --names \"server,client\" --prefix-colors \"cyan,magenta\" \"npm --prefix server start\" \"npm --prefix client run preview\"",
+    "install:all": "npm install && npm --prefix server install && npm --prefix client install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

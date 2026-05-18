@@ -1,0 +1,284 @@
+:root {
+  color-scheme: dark;
+  --bg: #0d0f14;
+  --panel: #161a23;
+  --panel-2: #1f2533;
+  --border: #2a3142;
+  --text: #e6e9f0;
+  --muted: #8d94a8;
+  --accent: #7c5cff;
+  --accent-2: #4ec9b0;
+  --danger: #ff6b6b;
+  --good: #4ec9b0;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.app {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.title {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.title span { color: var(--accent); }
+
+.rating-pill {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.rating-pill small {
+  color: var(--muted);
+  font-weight: 400;
+  margin-right: 6px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+}
+
+.player-wrap {
+  position: relative;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  margin-bottom: 16px;
+}
+.player-wrap video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.player-cover {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, #1a1f2e, #0d0f14);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.timer-bar {
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.timer-bar > div {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.1s linear;
+}
+
+.input-row {
+  position: relative;
+}
+input[type="text"] {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  outline: none;
+}
+input[type="text"]:focus {
+  border-color: var(--accent);
+}
+
+.autocomplete {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 10;
+}
+.autocomplete .item {
+  padding: 10px 14px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.autocomplete .item:last-child { border-bottom: none; }
+.autocomplete .item:hover,
+.autocomplete .item.active {
+  background: rgba(124, 92, 255, 0.15);
+}
+.autocomplete .year { color: var(--muted); font-size: 12px; margin-left: 6px; }
+
+.button-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+button {
+  flex: 1;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.secondary {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+button.danger { background: transparent; color: var(--danger); border: 1px solid var(--border); }
+
+.result {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+.result.correct { border-color: var(--good); }
+.result.wrong { border-color: var(--danger); }
+.result h3 { margin: 0 0 8px; }
+.result .delta-pos { color: var(--good); }
+.result .delta-neg { color: var(--danger); }
+.result .answer { font-size: 18px; font-weight: 600; }
+
+.history {
+  margin-top: 32px;
+}
+.history h3 { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+.history-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.history-row:last-child { border-bottom: none; }
+.history-row .name { color: var(--text); }
+.history-row .meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.footer-note {
+  margin-top: 24px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.footer-note a { color: var(--muted); }
+
+/* ---------- Multiplayer additions ---------- */
+.notice {
+  background: rgba(124, 92, 255, 0.12);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  text-align: center;
+}
+
+.vs-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 12px;
+}
+.vs-side { flex: 1; }
+.vs-side:last-child { text-align: right; }
+.vs-label {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.vs-name { font-weight: 700; font-size: 16px; }
+.vs-elo { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.vs-mid { color: var(--muted); font-size: 13px; white-space: nowrap; }
+
+.player-cover.countdown {
+  font-size: 64px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: 0.05em;
+}
+
+.pulse {
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+.opp-status {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  text-align: center;
+}
+.feedback {
+  color: var(--danger);
+  font-size: 14px;
+  margin-bottom: 10px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.rematch {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.rematch-q { font-weight: 600; margin-bottom: 6px; }
+.vote-state {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: pre-wrap;
+}
+.result .year { color: var(--muted); font-weight: 400; font-size: 14px; }
