@@ -521,27 +521,47 @@ button.danger { background: transparent; color: var(--danger); border: 1px solid
 }
 
 /* ---------- Glassy duel cards ---------- */
+/* The card IS the rank: tinted, bordered and glowing in the tier colour,
+   with the rank name as its headline. */
 .vs-card {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 16px 12px 14px;
+  padding: 0 0 16px;
+  overflow: hidden;
   border-radius: 16px;
   background: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.05),
-    rgba(255, 255, 255, 0.015)
+    color-mix(in srgb, var(--rank, var(--accent)) 26%, var(--panel)),
+    var(--panel)
   );
-  border: 1px solid var(--border);
-  border-top: 2px solid var(--rank, var(--accent));
-  backdrop-filter: blur(6px);
+  border: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 55%, var(--border));
+  box-shadow: 0 0 28px -12px var(--rank, var(--accent));
 }
-.vs-card .vs-label {
+.vs-rankbar {
+  width: 100%;
+  padding: 10px 8px 9px;
+  background: color-mix(in srgb, var(--rank, var(--accent)) 30%, transparent);
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--rank, var(--accent)) 50%, transparent);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.vs-eyebrow {
   color: var(--muted);
   font-size: 10px;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.16em;
+}
+.vs-rankname {
+  color: var(--rank, var(--accent));
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  text-shadow: 0 0 14px color-mix(in srgb, var(--rank) 60%, transparent);
 }
 .vs-ava-wrap {
   width: 56px;
@@ -549,7 +569,7 @@ button.danger { background: transparent; color: var(--danger); border: 1px solid
   border-radius: 50%;
   padding: 2px;
   background: var(--rank, var(--accent));
-  margin: 4px 0;
+  margin: 14px 0 4px;
 }
 .vs-ava {
   width: 100%;
@@ -560,7 +580,6 @@ button.danger { background: transparent; color: var(--danger); border: 1px solid
   font-size: 22px;
 }
 .vs-card .vs-name { font-weight: 700; font-size: 15px; text-align: center; }
-.vs-rank { font-size: 11px; font-weight: 700; }
 .vs-card .vs-elo {
   color: var(--muted);
   font-size: 13px;

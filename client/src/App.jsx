@@ -716,7 +716,10 @@ export default function App() {
     const rank = rankForElo(p.elo);
     return (
       <div className="vs-card" style={{ "--rank": rank.color }}>
-        <div className="vs-label">{label}</div>
+        <div className="vs-rankbar">
+          <span className="vs-eyebrow">{label}</span>
+          <span className="vs-rankname">{rank.name}</span>
+        </div>
         <div className="vs-ava-wrap">
           {p.avatar ? (
             <img
@@ -732,9 +735,6 @@ export default function App() {
           )}
         </div>
         <div className="vs-name">{p.nickname}</div>
-        <div className="vs-rank" style={{ color: rank.color }}>
-          {rank.name}
-        </div>
         <div className="vs-elo">{p.elo} Elo</div>
       </div>
     );
