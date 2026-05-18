@@ -17,6 +17,24 @@ const LS_TOKEN = "aoe.token";
 const LS_VOL = "aoe.volume";
 const STUN = [{ urls: "stun:stun.l.google.com:19302" }];
 
+// Anime-flavoured rank tiers across Elo ranges (everyone starts at 100).
+const RANKS = [
+  { min: 0, name: "Background Character", color: "#8d94a8" },
+  { min: 300, name: "Academy Student", color: "#4ec9b0" },
+  { min: 600, name: "Rookie Hunter", color: "#38bdf8" },
+  { min: 1000, name: "Chunin", color: "#a78bfa" },
+  { min: 1500, name: "Jonin", color: "#f472b6" },
+  { min: 2200, name: "S-Class Hero", color: "#fb923c" },
+  { min: 3000, name: "Kage", color: "#f87171" },
+  { min: 4000, name: "Anime God", color: "#fde047" },
+];
+function rankForElo(elo) {
+  let r = RANKS[0];
+  for (const t of RANKS) if ((elo ?? 0) >= t.min) r = t;
+  return r;
+}
+const initialOf = (n) => (n || "?").trim().charAt(0).toUpperCase();
+
 export default function App() {
   const socketRef = useRef(null);
   const videoRef = useRef(null);
@@ -44,6 +62,12 @@ export default function App() {
   const [inviteCode, setInviteCode] = useState(null);
   const [nameDraft, setNameDraft] = useState("");
   const [copied, setCopied] = useState(false);
+  const [rankUp, setRankUp] = useState(null); // {name,color} on tier-up
+  const rankUpTimer = useRef(null);
+  const [stats, setStats] = useState(null);
+  const [showStats, setShowStats] = useState(false);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const avatarInputRef = useRef(null);
   // Invite code from a ?invite= link, joined once we're authed.
   const pendingInviteRef = useRef(
     new URLSearchParams(window.location.search).get("invite")
@@ -61,7 +85,8 @@ export default function App() {
   const playStartRef = useRef(null);
   const tickRef = useRef(null);
   const tokenRef = useRef(localStorage.getItem(LS_TOKEN) || null);
-  const googleBtnRef = useRef(null);
+  const tokenClientRef = useRef(null);
+  const [gsiReady, setGsiReady] = useState(false);
 
   // ---- WebRTC (opt-in camera/mic with the opponent) ----
   const pcRef = useRef(null);
@@ -185,6 +210,18 @@ export default function App() {
       setPhase(PHASE.RESULT);
       setVotes({ you: null, opponent: null });
       refreshBoard();
+      // Rank-up reveal: did this result push us into a higher tier?
+      const before = data?.result?.eloBefore;
+      const after = data?.result?.eloAfter;
+      if (before != null && after != null) {
+        const rb = rankForElo(before);
+        const ra = rankForElo(after);
+        if (ra.min > rb.min) {
+          setRankUp(ra);
+          clearTimeout(rankUpTimer.current);
+          rankUpTimer.current = setTimeout(() => setRankUp(null), 5000);
+        }
+      }
     });
 
     socket.on("rematch:state", (v) => setVotes(v));
@@ -262,38 +299,43 @@ export default function App() {
     document.head.appendChild(s);
   }, []);
 
+  // Use Google's OAuth token flow so we render OUR OWN themed button instead
+  // of Google's white iframe widget.
   useEffect(() => {
-    if (phase !== PHASE.AUTH || !googleClientId || !googleBtnRef.current)
-      return;
+    if (!googleClientId) return;
     let tries = 0;
     const iv = setInterval(() => {
-      const g = window.google?.accounts?.id;
-      if (!g) {
-        if (++tries > 50) clearInterval(iv);
+      const oauth = window.google?.accounts?.oauth2;
+      if (!oauth) {
+        if (++tries > 80) clearInterval(iv);
         return;
       }
       clearInterval(iv);
-      g.initialize({
+      tokenClientRef.current = oauth.initTokenClient({
         client_id: googleClientId,
-        callback: ({ credential }) => handleGoogleCredential(credential),
+        scope: "openid email profile",
+        callback: (resp) => {
+          if (resp?.access_token) handleGoogleToken(resp.access_token);
+          else setNotice("Google sign-in was cancelled.");
+        },
       });
-      googleBtnRef.current.innerHTML = "";
-      g.renderButton(googleBtnRef.current, {
-        theme: "filled_blue",
-        size: "large",
-        text: "signin_with",
-        shape: "pill",
-      });
+      setGsiReady(true);
     }, 100);
     return () => clearInterval(iv);
-  }, [phase, googleClientId]);
+  }, [googleClientId]);
 
-  async function handleGoogleCredential(credential) {
+  function signInWithGoogle() {
+    if (!tokenClientRef.current) return;
+    setNotice(null);
+    tokenClientRef.current.requestAccessToken();
+  }
+
+  async function handleGoogleToken(accessToken) {
     try {
       const r = await fetch("/api/auth/google", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credential }),
+        body: JSON.stringify({ accessToken }),
       }).then((x) => x.json());
       if (!r.token) throw new Error(r.error || "sign-in failed");
       localStorage.setItem(LS_TOKEN, r.token);
@@ -357,6 +399,7 @@ export default function App() {
   useEffect(
     () => () => {
       clearInterval(tickRef.current);
+      clearTimeout(rankUpTimer.current);
       teardownRTC();
     },
     []
@@ -588,6 +631,52 @@ export default function App() {
     const n = nameDraft.trim();
     if (n && n !== me?.nickname) socketRef.current?.emit("setNickname", { nickname: n });
   };
+
+  function uploadAvatar(file) {
+    if (!file || !tokenRef.current) return;
+    if (file.size > 1_200_000) {
+      setNotice("Image too large (max ~1.2MB).");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      setAvatarBusy(true);
+      try {
+        const r = await fetch("/api/me/avatar", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${tokenRef.current}`,
+          },
+          body: JSON.stringify({ image: reader.result }),
+        }).then((x) => x.json());
+        if (r.player) {
+          setMe(r.player);
+          setNotice("Profile picture updated.");
+        } else setNotice(r.error || "Upload failed.");
+      } catch {
+        setNotice("Upload failed.");
+      } finally {
+        setAvatarBusy(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function loadStats() {
+    if (!tokenRef.current) return;
+    try {
+      const r = await fetch("/api/me/stats", {
+        headers: { Authorization: `Bearer ${tokenRef.current}` },
+      }).then((x) => x.json());
+      setStats(r);
+    } catch {}
+  }
+  function toggleStats() {
+    const next = !showStats;
+    setShowStats(next);
+    if (next) loadStats();
+  }
   const inviteUrl = inviteCode
     ? `${window.location.origin}/?invite=${inviteCode}`
     : "";
@@ -622,14 +711,34 @@ export default function App() {
     phase === PHASE.PLAYING ||
     phase === PHASE.RESULT;
 
-  const PlayerBadge = ({ p, label }) =>
-    p && (
-      <div className="vs-side">
+  const PlayerBadge = ({ p, label }) => {
+    if (!p) return null;
+    const rank = rankForElo(p.elo);
+    return (
+      <div className="vs-card" style={{ "--rank": rank.color }}>
         <div className="vs-label">{label}</div>
+        <div className="vs-ava-wrap">
+          {p.avatar ? (
+            <img
+              className="vs-ava"
+              src={p.avatar}
+              alt=""
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <span className="vs-ava avatar-fallback">
+              {initialOf(p.nickname)}
+            </span>
+          )}
+        </div>
         <div className="vs-name">{p.nickname}</div>
+        <div className="vs-rank" style={{ color: rank.color }}>
+          {rank.name}
+        </div>
         <div className="vs-elo">{p.elo} Elo</div>
       </div>
     );
+  };
 
   return (
     <div className="app">
@@ -642,11 +751,22 @@ export default function App() {
         </div>
         {me && (
           <div className="rating-pill">
-            {me.avatar && (
+            {me.avatar ? (
               <img className="avatar" src={me.avatar} alt="" referrerPolicy="no-referrer" />
+            ) : (
+              <span className="avatar avatar-fallback">
+                {initialOf(me.nickname)}
+              </span>
             )}
-            <small>{me.nickname}</small>
-            {me.elo}
+            <div className="pill-info">
+              <span className="pill-name">{me.nickname}</span>
+              <span
+                className="rank-badge"
+                style={{ color: rankForElo(me.elo).color }}
+              >
+                {rankForElo(me.elo).name} · {me.elo}
+              </span>
+            </div>
             <button className="signout" onClick={signOut} title="Sign out">
               ⏻
             </button>
@@ -656,25 +776,53 @@ export default function App() {
 
       {notice && <div className="notice">{notice}</div>}
 
+      {rankUp && (
+        <div className="rankup-overlay" onClick={() => setRankUp(null)}>
+          <div className="rankup-card" style={{ "--rank": rankUp.color }}>
+            <div className="rankup-label">RANK UP</div>
+            <div className="rankup-name" style={{ color: rankUp.color }}>
+              {rankUp.name}
+            </div>
+            <div className="rankup-sub">tap to dismiss</div>
+          </div>
+        </div>
+      )}
+
       <div className="card">
         {/* ---------- Sign in ---------- */}
         {phase === PHASE.AUTH && (
-          <div style={{ textAlign: "center", padding: "28px 0" }}>
-            <p style={{ color: "var(--muted)", marginTop: 0 }}>
-              Get matched against another player, hear the same opening, and
-              race to name the anime. Sign in so your Elo and place on the
-              leaderboard stick to your account.
-            </p>
+          <div className="hero">
+            <div className="hero-title">
+              Ani<span>Tune</span>
+            </div>
+            <div className="hero-sub">
+              Battle players. Guess faster. Climb&nbsp;ELO.
+            </div>
             {googleClientId === "" ? (
-              <div className="notice" style={{ marginTop: 16 }}>
+              <div className="notice" style={{ marginTop: 22 }}>
                 Google sign-in isn’t configured yet — set{" "}
                 <code>GOOGLE_CLIENT_ID</code> on the server.
               </div>
             ) : (
-              <div
-                ref={googleBtnRef}
-                style={{ display: "flex", justifyContent: "center", marginTop: 20 }}
-              />
+              <>
+                <button
+                  className="gsign"
+                  onClick={signInWithGoogle}
+                  disabled={!gsiReady}
+                >
+                  <svg className="gsign-g" viewBox="0 0 48 48" aria-hidden="true">
+                    <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.9 2.4 30.4 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.2C12.3 13.3 17.6 9.5 24 9.5z"/>
+                    <path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.1 5.3-4.6 7l7.1 5.5c4.2-3.9 6.6-9.6 6.6-17z"/>
+                    <path fill="#FBBC05" d="M10.5 28.4c-.5-1.4-.7-2.9-.7-4.4s.3-3 .7-4.4l-7.9-6.2C1 16.6 0 20.2 0 24s1 7.4 2.6 10.6l7.9-6.2z"/>
+                    <path fill="#34A853" d="M24 48c6.4 0 11.9-2.1 15.9-5.8l-7.1-5.5c-2 1.3-4.6 2.1-8.8 2.1-6.4 0-11.7-3.8-13.5-9.4l-7.9 6.2C6.5 42.6 14.6 48 24 48z"/>
+                  </svg>
+                  {gsiReady ? "Sign in with Google" : "Loading…"}
+                </button>
+                <div className="hero-note">
+                  Sign in so your Elo, rank, and leaderboard spot stay with
+                  your account.
+                </div>
+              </>
             )}
           </div>
         )}
@@ -682,9 +830,43 @@ export default function App() {
         {/* ---------- Lobby ---------- */}
         {phase === PHASE.LOBBY && (
           <div style={{ textAlign: "center", padding: "28px 0" }}>
-            <p style={{ marginTop: 0 }}>
-              Welcome back, <strong>{me?.nickname}</strong>.
-            </p>
+            <div className="lobby-id">
+              <div
+                className="lobby-ava"
+                onClick={() => avatarInputRef.current?.click()}
+                title="Change picture"
+              >
+                {me?.avatar ? (
+                  <img src={me.avatar} alt="" referrerPolicy="no-referrer" />
+                ) : (
+                  <span className="avatar-fallback">
+                    {initialOf(me?.nickname)}
+                  </span>
+                )}
+                <span className="lobby-ava-edit">
+                  {avatarBusy ? "…" : "✎"}
+                </span>
+              </div>
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  uploadAvatar(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+              <p style={{ margin: "10px 0 0" }}>
+                Welcome back, <strong>{me?.nickname}</strong>
+              </p>
+              <span
+                className="rank-badge"
+                style={{ color: rankForElo(me?.elo).color }}
+              >
+                {rankForElo(me?.elo).name} · {me?.elo} Elo
+              </span>
+            </div>
 
             <div className="name-editor">
               <label>Username</label>
@@ -728,6 +910,73 @@ export default function App() {
                 Play a friend
               </button>
             </div>
+
+            <button className="link-btn" onClick={toggleStats}>
+              {showStats ? "Hide stats" : "Stats & recent matches"}
+            </button>
+
+            {showStats && stats && (
+              <div className="stats">
+                <div className="stat-grid">
+                  <div className="stat">
+                    <span className="stat-n">{stats.peakElo}</span>
+                    <span className="stat-l">Peak Elo</span>
+                  </div>
+                  <div className="stat">
+                    <span className="stat-n">{stats.winrate}%</span>
+                    <span className="stat-l">Win rate</span>
+                  </div>
+                  <div className="stat">
+                    <span className="stat-n">
+                      {stats.wins}-{stats.losses}-{stats.draws}
+                    </span>
+                    <span className="stat-l">W-L-D</span>
+                  </div>
+                  <div className="stat">
+                    <span className="stat-n">
+                      {stats.avgGuessMs
+                        ? (stats.avgGuessMs / 1000).toFixed(1) + "s"
+                        : "—"}
+                    </span>
+                    <span className="stat-l">Avg guess</span>
+                  </div>
+                </div>
+                <h3>Recent matches</h3>
+                {stats.recent.length === 0 && (
+                  <div className="muted-row">No matches yet.</div>
+                )}
+                {stats.recent.map((m, i) => (
+                  <div className="match-row" key={i}>
+                    <span
+                      className={
+                        "m-res " +
+                        (m.outcome === "timeout"
+                          ? "draw"
+                          : m.youWon
+                          ? "win"
+                          : "loss")
+                      }
+                    >
+                      {m.outcome === "timeout"
+                        ? "DRAW"
+                        : m.youWon
+                        ? "WIN"
+                        : "LOSS"}
+                    </span>
+                    <span className="m-anime">{m.anime || "—"}</span>
+                    <span className="m-opp">vs {m.opponent}</span>
+                    {m.delta != null && (
+                      <span
+                        className={m.delta >= 0 ? "delta-pos" : "delta-neg"}
+                      >
+                        {m.delta >= 0 ? "+" : ""}
+                        {m.delta}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

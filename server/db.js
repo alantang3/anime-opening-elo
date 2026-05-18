@@ -105,6 +105,9 @@ function ensureColumn(table, column, type) {
 ensureColumn("mal_popularity", "titles", "TEXT");
 ensureColumn("players", "google_sub", "TEXT"); // Google account id (stable)
 ensureColumn("players", "avatar", "TEXT");
+ensureColumn("players", "avatar_is_custom", "INTEGER"); // user-uploaded pic
+ensureColumn("players", "peak_elo", "REAL"); // highest Elo ever reached
+db.exec(`UPDATE players SET peak_elo = elo WHERE peak_elo IS NULL`);
 db.exec(
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_google
      ON players(google_sub) WHERE google_sub IS NOT NULL`
@@ -136,8 +139,30 @@ const stmt = {
   setRecord: db.prepare(`
     UPDATE players
        SET elo = @elo, wins = @wins, losses = @losses, draws = @draws,
+           peak_elo = MAX(COALESCE(peak_elo, elo), @elo),
            last_seen = @now
      WHERE id = @id
+  `),
+  setCustomAvatar: db.prepare(`
+    UPDATE players SET avatar = @avatar, avatar_is_custom = 1 WHERE id = @id
+  `),
+  recentMatches: db.prepare(`
+    SELECT h.played_at, h.anime_name, h.outcome, h.duration_ms,
+           h.winner_id, h.loser_id,
+           h.winner_elo_after, h.loser_elo_after,
+           h.winner_elo_before, h.loser_elo_before,
+           wp.nickname AS winner_name, lp.nickname AS loser_name
+      FROM match_history h
+      LEFT JOIN players wp ON wp.id = h.winner_id
+      LEFT JOIN players lp ON lp.id = h.loser_id
+     WHERE h.winner_id = @id OR h.loser_id = @id
+     ORDER BY h.id DESC
+     LIMIT @limit
+  `),
+  avgGuessMs: db.prepare(`
+    SELECT AVG(duration_ms) AS avg
+      FROM match_history
+     WHERE winner_id = @id AND outcome = 'win' AND duration_ms > 0
   `),
   topPlayers: db.prepare(`
     SELECT id, nickname, elo, wins, losses, draws
@@ -166,7 +191,8 @@ const stmt = {
   // username the player chose isn't overwritten by their Google name.
   touchGoogle: db.prepare(`
     UPDATE players
-       SET avatar = @avatar, email = @email, last_seen = @now
+       SET avatar = CASE WHEN avatar_is_custom = 1 THEN avatar ELSE @avatar END,
+           email = @email, last_seen = @now
      WHERE id = @id
   `),
   setNickname: db.prepare(`
@@ -222,7 +248,7 @@ export function getOrCreateGooglePlayer({ sub, name, email, picture }) {
   const existing = stmt.getByGoogle.get(sub);
   if (existing) {
     stmt.touchGoogle.run({ id: existing.id, avatar, email: email || null, now });
-    return { ...existing, avatar }; // keep existing.nickname (may be custom)
+    return stmt.getByGoogle.get(sub); // re-read: keeps custom avatar/nickname
   }
   const id = crypto.randomUUID();
   stmt.insertGoogle.run({
@@ -242,6 +268,51 @@ export function setNickname(id, nickname) {
 
 export function getPlayer(id) {
   return stmt.getPlayer.get(id);
+}
+
+export function setCustomAvatar(id, avatarPath) {
+  stmt.setCustomAvatar.run({ id, avatar: avatarPath });
+  return stmt.getPlayer.get(id);
+}
+
+// Aggregate stats + recent matches for one player, from the player's own
+// perspective (win/loss, Elo delta, opponent).
+export function getPlayerStats(id, limit = 12) {
+  const p = stmt.getPlayer.get(id);
+  if (!p) return null;
+  const games = p.wins + p.losses + p.draws;
+  const avgRow = stmt.avgGuessMs.get({ id });
+  const recent = stmt.recentMatches.all({ id, limit }).map((m) => {
+    const won = m.winner_id === id;
+    const isTimeout = m.outcome === "timeout";
+    const before = won ? m.winner_elo_before : m.loser_elo_before;
+    const after = won ? m.winner_elo_after : m.loser_elo_after;
+    const oppName = won ? m.loser_name : m.winner_name;
+    return {
+      at: m.played_at,
+      anime: m.anime_name,
+      outcome: m.outcome,
+      youWon: isTimeout ? false : won,
+      opponent: oppName || "Bot",
+      eloAfter: after != null ? Math.round(after) : null,
+      delta:
+        before != null && after != null
+          ? Math.round((after - before) * 10) / 10
+          : null,
+      durationMs: m.duration_ms,
+    };
+  });
+  return {
+    elo: Math.round(p.elo),
+    peakElo: Math.round(p.peak_elo ?? p.elo),
+    wins: p.wins,
+    losses: p.losses,
+    draws: p.draws,
+    games,
+    winrate: games ? Math.round((p.wins / games) * 100) : 0,
+    avgGuessMs: avgRow?.avg ? Math.round(avgRow.avg) : null,
+    recent,
+  };
 }
 
 // Apply one finished round atomically: both players' new elo + W/L/D and a

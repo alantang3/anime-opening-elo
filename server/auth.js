@@ -61,11 +61,8 @@ export function verifySession(token) {
   }
 }
 
-// Verify a Google ID token and return { token, player }.
-export async function loginWithGoogle(idToken) {
-  if (!idToken) throw new Error("missing Google credential");
-  const profile = await verifyGoogleIdToken(idToken);
-  if (!profile?.sub) throw new Error("invalid Google token");
+function finishLogin(profile) {
+  if (!profile?.sub) throw new Error("invalid Google profile");
   const player = getOrCreateGooglePlayer({
     sub: profile.sub,
     name: profile.name,
@@ -73,4 +70,44 @@ export async function loginWithGoogle(idToken) {
     picture: profile.picture,
   });
   return { token: issueSession(player), player };
+}
+
+// Verify a Google ID token (GIS credential flow) → { token, player }.
+export async function loginWithGoogle(idToken) {
+  if (!idToken) throw new Error("missing Google credential");
+  return finishLogin(await verifyGoogleIdToken(idToken));
+}
+
+// Verify a Google OAuth access token (token flow, used by our own custom
+// sign-in button). We confirm the token was minted for THIS client id
+// (tokeninfo → aud), then read the profile from userinfo.
+let resolveAccessToken = async (accessToken) => {
+  const ti = await fetch(
+    "https://oauth2.googleapis.com/tokeninfo?access_token=" +
+      encodeURIComponent(accessToken)
+  );
+  if (!ti.ok) throw new Error("invalid access token");
+  const info = await ti.json();
+  if (info.aud !== GOOGLE_CLIENT_ID && info.azp !== GOOGLE_CLIENT_ID)
+    throw new Error("token not for this app");
+
+  const ui = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!ui.ok) throw new Error("userinfo failed");
+  const p = await ui.json();
+  return {
+    sub: p.sub || info.sub,
+    email: p.email || info.email,
+    name: p.name,
+    picture: p.picture,
+  };
+};
+export function __setAccessTokenResolverForTests(fn) {
+  resolveAccessToken = fn;
+}
+
+export async function loginWithGoogleAccessToken(accessToken) {
+  if (!accessToken) throw new Error("missing access token");
+  return finishLogin(await resolveAccessToken(accessToken));
 }

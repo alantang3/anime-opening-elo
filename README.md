@@ -182,8 +182,21 @@ and leaderboard spot are tied to that account.
 
 Your display name defaults to your Google name on first sign-in but is
 **editable** in the lobby (`setNickname`, 2–24 chars, not required to be
-unique). Subsequent Google logins refresh only avatar/email — they never
-overwrite a custom username.
+unique). Your **profile picture** defaults to the Google one but can be
+replaced in the lobby (upload → `POST /api/me/avatar`, stored on the
+persistent disk under `DATA_DIR/avatars/`, served at `/avatars/...`).
+Subsequent Google logins refresh only email — they never overwrite a custom
+username or a custom avatar (`avatar_is_custom` flag).
+
+Sign-in uses a **custom themed button** (Google OAuth token flow), not
+Google's rendered widget. `POST /api/auth/google` accepts either an access
+token (custom button) or a legacy ID-token credential.
+
+**Ranks & stats:** Elo maps to anime-flavoured rank tiers (Background
+Character → … → Anime God), shown on the pill and duel cards; crossing a
+tier upward triggers an animated rank-up reveal. `GET /api/me/stats`
+(Bearer session token) returns peak Elo, W/L/D, win rate, average guess
+time, and recent matches for the lobby's stats panel.
 
 Flow: the browser gets a Google ID token from Google Identity Services and
 POSTs it to `POST /api/auth/google`; the server verifies it (audience =

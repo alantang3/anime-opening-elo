@@ -25,6 +25,9 @@ import {
   applyMatchResult,
   leaderboard,
   setNickname,
+  setCustomAvatar,
+  getPlayerStats,
+  DATA_DIR,
 } from "./db.js";
 import { searchAnime } from "./animethemes.js";
 import { isCorrect } from "./matching.js";
@@ -34,6 +37,7 @@ import { resolveWin, resolveTimeout } from "./elo.js";
 import {
   GOOGLE_CLIENT_ID,
   loginWithGoogle,
+  loginWithGoogleAccessToken,
   verifySession,
 } from "./auth.js";
 
@@ -61,7 +65,23 @@ const BOT_NAMES = [
 // ---------- HTTP ----------
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "3mb" })); // headroom for base64 avatar uploads
+
+// User-uploaded avatars live on the persistent disk and are served here.
+const AVATAR_DIR = path.join(DATA_DIR, "avatars");
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
+app.use(
+  "/avatars",
+  express.static(AVATAR_DIR, { maxAge: "1h", immutable: false })
+);
+
+// Pull the authenticated player from a Bearer session token (HTTP routes;
+// the socket has its own auth). Returns the player row or null.
+function authPlayer(req) {
+  const m = /^Bearer (.+)$/.exec(req.headers.authorization || "");
+  const s = m && verifySession(m[1]);
+  return s?.sub ? getPlayer(s.sub) : null;
+}
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -70,11 +90,14 @@ app.get("/api/config", (_req, res) =>
   res.json({ googleClientId: GOOGLE_CLIENT_ID })
 );
 
-// Exchange a Google ID token for our session token.
+// Exchange a Google credential for our session token. Accepts either an ID
+// token (legacy GIS button) or an OAuth access token (our custom button).
 app.post("/api/auth/google", async (req, res) => {
   try {
-    const { credential } = req.body || {};
-    const { token, player } = await loginWithGoogle(credential);
+    const { credential, accessToken } = req.body || {};
+    const { token, player } = accessToken
+      ? await loginWithGoogleAccessToken(accessToken)
+      : await loginWithGoogle(credential);
     res.json({ token, player: publicPlayer(player) });
   } catch (err) {
     console.error("auth/google:", err.message);
@@ -110,6 +133,43 @@ app.get("/api/search", async (req, res) => {
 
 app.get("/api/leaderboard", (_req, res) => {
   res.json({ players: leaderboard(20) });
+});
+
+// Stats + recent matches for the signed-in player.
+app.get("/api/me/stats", (req, res) => {
+  const p = authPlayer(req);
+  if (!p) return res.status(401).json({ error: "sign in" });
+  res.json(getPlayerStats(p.id, 12));
+});
+
+// Upload a custom profile picture (base64 data URL in JSON).
+const AVATAR_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
+app.post("/api/me/avatar", (req, res) => {
+  const p = authPlayer(req);
+  if (!p) return res.status(401).json({ error: "sign in" });
+  const m = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(
+    String(req.body?.image || "")
+  );
+  if (!m) return res.status(400).json({ error: "expected png/jpeg/webp" });
+  const buf = Buffer.from(m[2], "base64");
+  if (buf.length > 1_200_000)
+    return res.status(413).json({ error: "image too large (max ~1.2MB)" });
+  const ext = AVATAR_EXT[m[1]];
+  // Single file per player; clean up other extensions so it doesn't grow.
+  for (const e of Object.values(AVATAR_EXT)) {
+    if (e !== ext)
+      try {
+        fs.unlinkSync(path.join(AVATAR_DIR, `${p.id}.${e}`));
+      } catch {}
+  }
+  try {
+    fs.writeFileSync(path.join(AVATAR_DIR, `${p.id}.${ext}`), buf);
+  } catch (e) {
+    return res.status(500).json({ error: "could not save image" });
+  }
+  const url = `/avatars/${p.id}.${ext}?t=${Date.now()}`;
+  const updated = setCustomAvatar(p.id, url);
+  res.json({ player: publicPlayer(updated) });
 });
 
 // ---------- Static frontend (production single-service) ----------
