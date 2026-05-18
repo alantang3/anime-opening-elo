@@ -421,6 +421,7 @@ export function pickPooledOpening({ minMembers, target, band = 25 }) {
     animeId: r.anime_id,
     animeName: r.anime_name,
     animeSlug: r.anime_slug,
+    themeSlug: r.theme_slug,
     year: r.year,
     song: r.song,
     videoLink: r.video_link,

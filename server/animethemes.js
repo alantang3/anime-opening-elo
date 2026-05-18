@@ -99,6 +99,39 @@ export async function getOpeningThemes(animeSlug) {
   }
 }
 
+// Every playable video link for an anime's OP themes, ordered as fallbacks:
+// the SAME theme first (keeps the song label accurate), then other OP
+// themes; within a theme every version (entry) and every encode, highest
+// resolution first. De-duplicated. Used when a chosen link is dead so a
+// round can try a different version/encode instead of being scrapped.
+export async function getThemeVideoLinks(animeSlug, themeSlug) {
+  if (!animeSlug) return [];
+  try {
+    const data = await fetchJSON(
+      `${BASE}/anime/${encodeURIComponent(animeSlug)}` +
+        `?include=animethemes.animethemeentries.videos`
+    );
+    const themes = (data.anime?.animethemes || []).filter(
+      (t) => t.type === "OP"
+    );
+    const linksFor = (t) => {
+      const out = [];
+      for (const entry of t.animethemeentries || []) {
+        const vids = [...(entry.videos || [])].sort(
+          (a, b) => (b.resolution || 0) - (a.resolution || 0)
+        );
+        for (const v of vids) if (v?.link) out.push(v.link);
+      }
+      return out;
+    };
+    const same = themes.filter((t) => t.slug === themeSlug).flatMap(linksFor);
+    const other = themes.filter((t) => t.slug !== themeSlug).flatMap(linksFor);
+    return [...new Set([...same, ...other])];
+  } catch {
+    return [];
+  }
+}
+
 // Convenience fallback: a single random opening with its detail resolved.
 export async function getRandomOpening() {
   const [c] = await getOpeningCandidates(15);

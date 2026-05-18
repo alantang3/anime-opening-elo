@@ -121,7 +121,7 @@ export async function pickOpeningForElo(avgElo) {
           year: row.year,
         },
         song: row.song ? { title: row.song } : null,
-        theme: null,
+        theme: row.themeSlug ? { slug: row.themeSlug } : null,
         video: { link: row.videoLink },
         malId: row.malId,
         popularity: {

@@ -29,7 +29,7 @@ import {
   getPlayerStats,
   DATA_DIR,
 } from "./db.js";
-import { searchAnime } from "./animethemes.js";
+import { searchAnime, getThemeVideoLinks } from "./animethemes.js";
 import { isCorrect } from "./matching.js";
 import { pickOpeningForElo } from "./selectOpening.js";
 import { startIngester } from "./pool.js";
@@ -298,6 +298,9 @@ function createMatch(a, b) {
     c.status = "match";
     c.matchId = id;
     c.socket.join(id);
+    // conn.player is only set at auth, never after applyMatchResult — re-read
+    // so matchFound's `you` reflects Elo earned earlier this session.
+    if (!c.isBot) c.player = getPlayer(c.player.id) || c.player;
   }
   const [pa, pb] = match.members;
   // `polite` is the WebRTC perfect-negotiation tiebreaker — exactly one peer
@@ -321,6 +324,7 @@ async function startRound(match) {
   match.round += 1;
   match.opening = null;
   match.correctAnimeId = null;
+  match.altLinksP = null; // lazily-fetched fallback video links (this round)
   match.accepted = [];
   match.franchise = null;
   match.dub = null;
@@ -632,6 +636,38 @@ function dissolveMatch(match, { requeue = false, reason } = {}, leaverId) {
   }
 }
 
+// A client reported the opening won't play on their screen. The round can't
+// be fair if only one side hears it and there's nothing we can do about a bad
+// CDN/codec, so VOID the round — no Elo change (not the players' fault) — and
+// drop straight into the normal rematch handshake so the SAME two players can
+// choose to play each other again. Only valid before a round is decided;
+// ignored on the result/vote screen (it already played).
+function abortUnplayable(match) {
+  if (!matches.has(match.id)) return;
+  if (!["preparing", "countdown", "playing"].includes(match.state)) return;
+  if (!match.opening) return; // nothing to reveal yet — let it time out
+  match.state = "result";
+  clearTimers(match);
+
+  const perSocket = { outcome: "unplayable" };
+  for (const c of match.members) {
+    const s = freshSnapshot(c);
+    perSocket[c.socket.id] = {
+      youWon: false,
+      eloBefore: Math.round(s.eloRaw),
+      eloAfter: Math.round(s.eloRaw), // unchanged
+      delta: 0,
+    };
+  }
+  emitRoundEnd(match, perSocket); // reveals the answer; no DB write
+  for (const c of match.members)
+    if (!c.isBot)
+      c.socket.emit("errorMsg", {
+        message: "That opening wouldn't play — round skipped (no Elo change).",
+      });
+  beginRematch(match);
+}
+
 // The opponent is gone (real disconnect, declined the rematch, or the rematch
 // timed out) but THIS player is still connected. Don't yank them off the
 // result screen: tear the match down once and leave each surviving human
@@ -919,6 +955,38 @@ io.on("connection", (socket) => {
     const c = conns.get(socket.id);
     const m = c?.matchId && matches.get(c.matchId);
     if (m) onMediaDuration(m, socket.id, ms);
+  });
+
+  // The opening wouldn't play on this client → scrap the round, requeue both.
+  socket.on("roundUnplayable", () => {
+    const c = conns.get(socket.id);
+    const m = c?.matchId && matches.get(c.matchId);
+    if (m) abortUnplayable(m);
+  });
+
+  // A video link wouldn't play here — hand back the next version/encode of
+  // the same OP. Alternates are fetched from AnimeThemes once per round
+  // (lazily, only on a failure) and cached on the match. The client escalates
+  // to roundUnplayable when we run out (url: null).
+  socket.on("round:videoFailed", async ({ url } = {}) => {
+    const c = conns.get(socket.id);
+    const m = c?.matchId && matches.get(c.matchId);
+    if (!m) return;
+    if (!["preparing", "countdown", "playing"].includes(m.state)) return;
+    const slug = m.opening?.anime?.slug;
+    if (!slug) return socket.emit("round:altVideo", { url: null });
+    if (!m.altLinksP)
+      m.altLinksP = getThemeVideoLinks(slug, m.opening?.theme?.slug);
+    let links = [];
+    try {
+      links = (await m.altLinksP) || [];
+    } catch {
+      links = [];
+    }
+    if (!matches.has(m.id)) return; // round/match ended while fetching
+    const i = links.indexOf(url);
+    const next = i >= 0 ? links[i + 1] : links.find((l) => l && l !== url);
+    socket.emit("round:altVideo", { url: next || null });
   });
 
   socket.on("guess", ({ animeId, guessText } = {}) => {

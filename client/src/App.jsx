@@ -76,17 +76,19 @@ export default function App() {
     new URLSearchParams(window.location.search).get("invite")
   );
 
-  // Guess autocomplete
+  // Guess: free-text only. You just need the franchise — no season/title
+  // picker (the server matches against the franchise-wide accepted set).
   const [query, setQuery] = useState("");
-  const [options, setOptions] = useState([]);
-  const [activeIdx, setActiveIdx] = useState(0);
-  const [picked, setPicked] = useState(null);
-  const searchTimer = useRef(null);
   const inputRef = useRef(null);
 
   const durationRef = useRef(null);
   const playStartRef = useRef(null);
   const tickRef = useRef(null);
+  // Set once per round if the opening genuinely can't play here, so we don't
+  // spam the server (reset on round:prepare).
+  const unplayableSentRef = useRef(false);
+  const altReqRef = useRef(false); // an alternate-video request is in flight
+  const lastFailReasonRef = useRef("unplayable");
   const tokenRef = useRef(localStorage.getItem(LS_TOKEN) || null);
   const tokenClientRef = useRef(null);
   const [gsiReady, setGsiReady] = useState(false);
@@ -175,9 +177,9 @@ export default function App() {
       setFeedback(null);
       setOppStatus(null);
       setQuery("");
-      setOptions([]);
-      setPicked(null);
       setNeedTap(false);
+      unplayableSentRef.current = false;
+      altReqRef.current = false;
       setRoundInfo({ round, videoUrl, dub: dub || null, durationMs: null });
       setPhase(PHASE.PREPARE);
     });
@@ -197,11 +199,22 @@ export default function App() {
       }, 1000);
     });
 
+    // Server's answer to round:videoFailed — swap to the next version/encode,
+    // or (url == null) we're out of alternates → scrap the round.
+    socket.on("round:altVideo", ({ url }) => {
+      altReqRef.current = false;
+      if (url) {
+        setNotice(null);
+        setNeedTap(false);
+        setRoundInfo((prev) => (prev ? { ...prev, videoUrl: url } : prev));
+      } else {
+        reportUnplayable(lastFailReasonRef.current || "unplayable");
+      }
+    });
+
     socket.on("guess:result", ({ correct }) => {
       if (!correct) {
         setFeedback("Not it — keep guessing!");
-        setPicked(null);
-        setOptions([]);
         setTimeout(() => inputRef.current?.select(), 30);
       }
     });
@@ -217,6 +230,13 @@ export default function App() {
       setVotes({ you: null, opponent: null });
       setOppGone(false);
       refreshBoard();
+      // Keep the player's own Elo (profile badge / next match) in sync. The
+      // leaderboard refetches, but `me` previously only changed on auth or
+      // matchFound, so a non-leaderboard player never saw their rating move.
+      if (data?.result?.eloAfter != null)
+        setMe((prev) =>
+          prev ? { ...prev, elo: data.result.eloAfter } : prev
+        );
       // Rank-up reveal: did this result push us into a higher tier?
       const before = data?.result?.eloBefore;
       const after = data?.result?.eloAfter;
@@ -370,22 +390,54 @@ export default function App() {
     setPhase(PHASE.AUTH);
   }
 
+  // The opening genuinely can't play on THIS screen (bad CDN/codec/region,
+  // or even a tap couldn't start it). One round can't continue with only one
+  // side hearing it, so tell the server to scrap it and re-queue both of us.
+  function reportUnplayable(reason) {
+    if (unplayableSentRef.current) return;
+    unplayableSentRef.current = true;
+    socketRef.current?.emit("roundUnplayable", { reason });
+  }
+
+  // A video link wouldn't play here. Before scrapping the round, ask the
+  // server for the next version/encode of the same OP (some AnimeThemes
+  // links are dead on the CDN while others for the same song work fine).
+  // The server replies with `round:altVideo`; if it's out of alternates we
+  // escalate to reportUnplayable (→ void round + rematch).
+  function handleVideoFail(reason) {
+    if (unplayableSentRef.current || altReqRef.current) return;
+    altReqRef.current = true;
+    lastFailReasonRef.current = reason;
+    setNotice("That version wouldn't play — trying another…");
+    socketRef.current?.emit("round:videoFailed", {
+      url: roundInfo?.videoUrl,
+      reason,
+    });
+  }
+
+  function attemptPlay() {
+    const v = videoRef.current;
+    if (!v) return;
+    v.volume = volume;
+    v.currentTime = 0;
+    v.play().then(
+      () => setNeedTap(false),
+      (err) => {
+        // NotAllowedError = browser autoplay policy (gesture window elapsed
+        // during the countdown): a single tap fixes this, so offer it.
+        // Anything else = this encode won't play here → try another version.
+        if (err && err.name === "NotAllowedError") setNeedTap(true);
+        else handleVideoFail("play:" + (err?.name || "unknown"));
+      }
+    );
+  }
+
   // ---------- Timer (visual only; server is authoritative) ----------
   function beginPlaying() {
     setPhase(PHASE.PLAYING);
     playStartRef.current = Date.now();
     setRemaining(1);
-    const v = videoRef.current;
-    if (v) {
-      v.volume = volume;
-      v.currentTime = 0;
-      // If the browser blocks autoplay (gesture window elapsed during the
-      // countdown), surface a one-tap fallback instead of failing silently.
-      v.play().then(
-        () => setNeedTap(false),
-        () => setNeedTap(true)
-      );
-    }
+    attemptPlay();
     setTimeout(() => inputRef.current?.focus(), 50);
     clearInterval(tickRef.current);
     tickRef.current = setInterval(() => {
@@ -401,9 +453,16 @@ export default function App() {
     v.volume = volume;
     v.play().then(
       () => setNeedTap(false),
-      () => {}
+      // A real tap still failed → not autoplay policy; try another version.
+      (err) => handleVideoFail("tap:" + (err?.name || "unknown"))
     );
   }
+  // When the server hands us a different version/encode mid-round, the
+  // <video> remounts (keyed on its src); replay it if the song's already on.
+  useEffect(() => {
+    if (phase === PHASE.PLAYING) attemptPlay();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roundInfo?.videoUrl]);
   function stopTimer() {
     clearInterval(tickRef.current);
     const v = videoRef.current;
@@ -421,6 +480,23 @@ export default function App() {
   useEffect(() => {
     if (videoRef.current) videoRef.current.volume = volume;
   }, [volume, roundInfo?.videoUrl, phase]);
+
+  // Bind A/V streams AFTER the <video> elements mount. They render only when
+  // (camOn || micOn || hasRemote) AND not on the RESULT replay, so the
+  // elements also mount/unmount across phases — applyMedia()/ontrack assign
+  // srcObject before that, so on first mount the ref is still null and the
+  // stream is lost (blank local preview, no remote A/V). Re-bind here once
+  // the elements actually exist. `phase` is a dep so a remount rebinds too.
+  useEffect(() => {
+    const lv = localVideoRef.current;
+    if (lv && lv.srcObject !== localStreamRef.current)
+      lv.srcObject = localStreamRef.current;
+    const rv = remoteVideoRef.current;
+    if (rv && rv.srcObject !== remoteStreamRef.current) {
+      rv.srcObject = remoteStreamRef.current;
+      rv.play().catch(() => {}); // kick autoplay (esp. remote audio)
+    }
+  }, [camOn, micOn, hasRemote, phase]);
 
   function changeVolume(val) {
     const v = Math.min(1, Math.max(0, val));
@@ -589,47 +665,16 @@ export default function App() {
     setPeerAV({ cam: false, mic: false });
   }
 
-  // ---------- Autocomplete ----------
-  useEffect(() => {
-    clearTimeout(searchTimer.current);
-    if (!query || query.length < 2) {
-      setOptions([]);
-      return;
-    }
-    if (picked && query !== picked.name) setPicked(null);
-    searchTimer.current = setTimeout(async () => {
-      try {
-        const r = await fetch(
-          `/api/search?q=${encodeURIComponent(query)}`
-        ).then((x) => x.json());
-        setOptions(r.results || []);
-        setActiveIdx(0);
-      } catch (e) {
-        console.error(e);
-      }
-    }, 180);
-    return () => clearTimeout(searchTimer.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query]);
-
   const submitGuess = useCallback(() => {
     const guessText = query.trim();
     if (!guessText) return;
-    socketRef.current?.emit("guess", { guessText, animeId: picked?.id });
-  }, [query, picked]);
+    socketRef.current?.emit("guess", { guessText });
+  }, [query]);
 
   function onKeyDown(e) {
     if (e.key === "Enter") {
       e.preventDefault();
       submitGuess();
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setActiveIdx((i) => Math.min(options.length - 1, i + 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActiveIdx((i) => Math.max(0, i - 1));
-    } else if (e.key === "Escape") {
-      setOptions([]);
     }
   }
 
@@ -1048,16 +1093,41 @@ export default function App() {
                 playsInline
                 controls={phase === PHASE.RESULT}
                 onLoadedMetadata={onLoadedMetadata}
-                onError={() =>
-                  roundInfo?.videoUrl &&
-                  setNotice(
-                    "Couldn't load this opening (network/CDN). Skipping…"
-                  )
-                }
+                onError={() => {
+                  if (!roundInfo?.videoUrl) return;
+                  // A media error on the live round (not the RESULT replay):
+                  // try another version/encode before scrapping the round.
+                  if (
+                    phase === PHASE.PREPARE ||
+                    phase === PHASE.COUNTDOWN ||
+                    phase === PHASE.PLAYING
+                  ) {
+                    handleVideoFail("mediaerror");
+                  }
+                }}
                 style={{
                   visibility: phase === PHASE.RESULT ? "visible" : "hidden",
                 }}
               />
+              {/* Camera/mic feeds live INSIDE the player box (not a separate
+                  box). Hidden on the RESULT replay so the opening shows. */}
+              {phase !== PHASE.RESULT && (camOn || micOn || hasRemote) && (
+                <div className="player-cam">
+                  <video
+                    ref={remoteVideoRef}
+                    autoPlay
+                    playsInline
+                    className={"cam-remote" + (hasRemote ? "" : " empty")}
+                  />
+                  <video
+                    ref={localVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="cam-local"
+                  />
+                </div>
+              )}
               {phase === PHASE.PREPARE && (
                 <div className="player-cover">Buffering opening…</div>
               )}
@@ -1075,13 +1145,8 @@ export default function App() {
                   🔊 Tap to start the song
                 </div>
               )}
-              {phase === PHASE.PLAYING && !needTap && (
-                <div className="player-cover">
-                  ▶ audio playing — name the anime
-                  {roundInfo?.dub && (
-                    <span className="dub-badge">🎙 English dub</span>
-                  )}
-                </div>
+              {phase === PHASE.PLAYING && !needTap && roundInfo?.dub && (
+                <span className="dub-badge dub-float">🎙 English dub</span>
               )}
             </div>
 
@@ -1106,23 +1171,6 @@ export default function App() {
                   : "—"}
               </span>
             </div>
-            {(camOn || micOn || hasRemote) && (
-              <div className="av-videos">
-                <video
-                  ref={remoteVideoRef}
-                  autoPlay
-                  playsInline
-                  className={"av-remote" + (hasRemote ? "" : " empty")}
-                />
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="av-local"
-                />
-              </div>
-            )}
 
             {phase === PHASE.PLAYING && (
               <div className="volume-row">
@@ -1163,26 +1211,6 @@ export default function App() {
                     onKeyDown={onKeyDown}
                     autoComplete="off"
                   />
-                  {options.length > 0 && !picked && (
-                    <div className="autocomplete">
-                      {options.map((o, i) => (
-                        <div
-                          key={o.id}
-                          className={"item" + (i === activeIdx ? " active" : "")}
-                          onMouseEnter={() => setActiveIdx(i)}
-                          onClick={() => {
-                            setPicked(o);
-                            setQuery(o.name);
-                            setOptions([]);
-                            inputRef.current?.focus();
-                          }}
-                        >
-                          {o.name}
-                          {o.year && <span className="year">({o.year})</span>}
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
                 <div className="button-row">
                   <button onClick={submitGuess} disabled={!query.trim()}>
@@ -1244,14 +1272,19 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue }) {
   const r = result.result || {};
   const won = r.youWon;
   const cls =
-    result.outcome === "timeout" ? "wrong" : won ? "correct" : "wrong";
+    result.outcome === "timeout" || result.outcome === "unplayable"
+      ? "wrong"
+      : won
+      ? "correct"
+      : "wrong";
   const delta = r.delta ?? 0;
-  const pop = result.popularity || {};
 
   return (
     <div className={"result " + cls}>
       <h3>
-        {result.outcome === "timeout"
+        {result.outcome === "unplayable"
+          ? "Opening wouldn't play — round skipped"
+          : result.outcome === "timeout"
           ? "Time's up — nobody got it"
           : result.outcome === "disconnect"
           ? won
@@ -1285,21 +1318,6 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue }) {
           ({delta >= 0 ? "+" : ""}
           {delta})
         </span>
-      </div>
-      <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>
-        {pop.members != null
-          ? `MAL: ${pop.members.toLocaleString()} members`
-          : "MAL popularity unknown"}
-        {pop.score ? ` · score ${pop.score}` : ""}
-        {pop.factor != null
-          ? ` · stake ×${pop.factor.toFixed(2)} (${
-              pop.factor > 0.66
-                ? "obscure"
-                : pop.factor > 0.33
-                ? "moderate"
-                : "popular"
-            })`
-          : ""}
       </div>
 
       {oppGone ? (
