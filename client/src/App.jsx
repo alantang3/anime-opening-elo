@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 
+// Decorative cat-girl art served from /public. 3 flank the left edge, 3 the
+// right (hidden on narrow screens where there's no gutter room).
+const RAIL_LEFT = ["/catgirl_1.png", "/catgirl_2.png", "/catgirl_3.png"];
+const RAIL_RIGHT = ["/catgirl_4.png", "/catgirl_5.png", "/catgirl_6.png"];
+
 // Screen phases. AUTH/LOBBY are local; the rest are driven by server events.
 const PHASE = {
   AUTH: "auth",         // not signed in
@@ -53,6 +58,8 @@ export default function App() {
   // The round plays the AUDIO file (reliable); flips to the video on audio
   // failure. RESULT always shows the video for the reveal.
   const [audioFailed, setAudioFailed] = useState(false);
+  // Brief curtain-reveal animation when a match is found.
+  const [matchStarting, setMatchStarting] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [remaining, setRemaining] = useState(1);
   const [feedback, setFeedback] = useState(null);
@@ -93,6 +100,7 @@ export default function App() {
   const altReqRef = useRef(false); // an alternate-video request is in flight
   const lastFailReasonRef = useRef("unplayable");
   const watchdogRef = useRef(null); // detects "loaded but not actually playing"
+  const matchStartTimer = useRef(null);
   const tokenRef = useRef(localStorage.getItem(LS_TOKEN) || null);
   const tokenClientRef = useRef(null);
   const [gsiReady, setGsiReady] = useState(false);
@@ -171,6 +179,9 @@ export default function App() {
       setHasRemote(false);
       setPeerAV({ cam: false, mic: false });
       ensurePeer(); // ready to negotiate if either side enables A/V
+      setMatchStarting(true); // curtain-reveal into the match
+      clearTimeout(matchStartTimer.current);
+      matchStartTimer.current = setTimeout(() => setMatchStarting(false), 1100);
       setPhase(PHASE.PREPARE);
     });
 
@@ -860,8 +871,24 @@ export default function App() {
     );
   };
 
+  const showRails = phase === PHASE.LOBBY || inMatch;
+
   return (
     <div className="app">
+      {showRails && (
+        <>
+          <div className="side-rail side-left" aria-hidden="true">
+            {RAIL_LEFT.map((src, i) => (
+              <img key={i} src={src} alt="" />
+            ))}
+          </div>
+          <div className="side-rail side-right" aria-hidden="true">
+            {RAIL_RIGHT.map((src, i) => (
+              <img key={i} src={src} alt="" />
+            ))}
+          </div>
+        </>
+      )}
       <div className="header">
         <div className="title-wrap">
           <img src="/anitune.png" alt="AniTune" className="app-icon" />
@@ -1139,15 +1166,15 @@ export default function App() {
         {/* ---------- Match ---------- */}
         {inMatch && (
           <>
-            <div className="vs-bar">
-              <PlayerBadge p={me} label="YOU" />
-              <div className="vs-mid">
-                vs{roundInfo?.round ? ` · round ${roundInfo.round}` : ""}
-              </div>
-              <PlayerBadge p={opponent} label="OPPONENT" />
-            </div>
+            <div
+              className={"match-stage" + (matchStarting ? " is-opening" : "")}
+            >
+              <aside className="stage-side stage-left">
+                <PlayerBadge p={me} label="YOU" />
+              </aside>
 
-            <div className="player-wrap">
+              <div className="stage-center">
+                <div className="player-wrap">
               <video
                 ref={videoRef}
                 key={roundSrc}
@@ -1210,6 +1237,47 @@ export default function App() {
               {phase === PHASE.PLAYING && !needTap && roundInfo?.dub && (
                 <span className="dub-badge dub-float">🎙 English dub</span>
               )}
+                </div>
+              </div>
+
+              <aside className="stage-side stage-right">
+                <PlayerBadge p={opponent} label="OPPONENT" />
+              </aside>
+
+              {matchStarting && (
+                <div className="curtain" aria-hidden="true">
+                  <div className="curtain-panel curtain-left">
+                    <span className="curtain-eyebrow">YOU</span>
+                    <span className="curtain-ava">
+                      {me?.avatar ? (
+                        <img src={me.avatar} alt="" referrerPolicy="no-referrer" />
+                      ) : (
+                        initialOf(me?.nickname)
+                      )}
+                    </span>
+                    <span className="curtain-name">{me?.nickname}</span>
+                  </div>
+                  <div className="curtain-panel curtain-right">
+                    <span className="curtain-eyebrow">OPPONENT</span>
+                    <span className="curtain-ava">
+                      {opponent?.avatar ? (
+                        <img
+                          src={opponent.avatar}
+                          alt=""
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        initialOf(opponent?.nickname)
+                      )}
+                    </span>
+                    <span className="curtain-name">{opponent?.nickname}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="round-tag">
+              {roundInfo?.round ? `Round ${roundInfo.round}` : " "}
             </div>
 
             {/* ---- Camera / mic with opponent ---- */}
