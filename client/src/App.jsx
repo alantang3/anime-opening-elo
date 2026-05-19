@@ -1,11 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
 
-// Decorative cat-girl art served from /public. 3 flank the left edge, 3 the
-// right (hidden on narrow screens where there's no gutter room).
-const RAIL_LEFT = ["/catgirl_1.png", "/catgirl_2.png", "/catgirl_3.png"];
-const RAIL_RIGHT = ["/catgirl_4.png", "/catgirl_5.png", "/catgirl_6.png"];
-
 // Screen phases. AUTH/LOBBY are local; the rest are driven by server events.
 const PHASE = {
   AUTH: "auth",         // not signed in
@@ -47,22 +42,24 @@ if (import.meta.env.VITE_TURN_URL) {
 }
 
 // Anime-flavoured rank tiers across Elo ranges (everyone starts at 100).
+// Escalating aura: dim/cool at the bottom → cool-vivid → hot → radiant.
+// Every tier is a distinct hue/brightness so no two look alike.
 const RANKS = [
-  { min: 0, name: "Background Character", color: "#8d94a8" },
-  { min: 300, name: "Academy Student", color: "#4ec9b0" },
-  { min: 600, name: "Rookie Hunter", color: "#38bdf8" },
-  { min: 900, name: "Genin", color: "#22d3ee" },
-  { min: 1200, name: "Chunin", color: "#a78bfa" },
-  { min: 1500, name: "Jonin", color: "#f472b6" },
-  { min: 1800, name: "Survey Corps Member", color: "#84cc16" },
-  { min: 2100, name: "Pro Hero", color: "#fb923c" },
-  { min: 2400, name: "Hashira", color: "#f43f5e" },
-  { min: 2700, name: "S-Class Hero", color: "#fbbf24" },
-  { min: 3000, name: "Special Grade Sorcerer", color: "#8b5cf6" },
-  { min: 3300, name: "Kage", color: "#ef4444" },
-  { min: 3600, name: "Pirate King", color: "#f59e0b" },
-  { min: 3900, name: "The Honored One", color: "#06b6d4" },
-  { min: 4200, name: "Super Saiyan", color: "#fde047" },
+  { min: 0, name: "Background Character", color: "#6e7687" },
+  { min: 300, name: "Academy Student", color: "#4a7fb5" },
+  { min: 600, name: "Rookie Hunter", color: "#2f9fe0" },
+  { min: 900, name: "Genin", color: "#15c0c0" },
+  { min: 1200, name: "Chunin", color: "#14cf86" },
+  { min: 1500, name: "Jonin", color: "#3ad63f" },
+  { min: 1800, name: "Survey Corps Member", color: "#9ad81b" },
+  { min: 2100, name: "Pro Hero", color: "#e8b317" },
+  { min: 2400, name: "Hashira", color: "#f6851f" },
+  { min: 2700, name: "S-Class Hero", color: "#fb5a2e" },
+  { min: 3000, name: "Special Grade Sorcerer", color: "#f5356e" },
+  { min: 3300, name: "Kage", color: "#e62222" },
+  { min: 3600, name: "Pirate King", color: "#c026d6" },
+  { min: 3900, name: "The Honored One", color: "#6a5cff" },
+  { min: 4200, name: "Super Saiyan", color: "#ffd23d" },
   { min: 4500, name: "Anime God", color: "#ffffff" },
 ];
 function rankForElo(elo) {
@@ -938,26 +935,11 @@ export default function App() {
     );
   };
 
-  const showRails = phase === PHASE.LOBBY || inMatch;
   const myBoardIndex = me ? board.findIndex((p) => p.id === me.id) : -1;
   const myTitle = leaderboardTitle(myBoardIndex);
 
   return (
     <div className="app">
-      {showRails && (
-        <>
-          <div className="side-rail side-left" aria-hidden="true">
-            {RAIL_LEFT.map((src, i) => (
-              <img key={i} src={src} alt="" />
-            ))}
-          </div>
-          <div className="side-rail side-right" aria-hidden="true">
-            {RAIL_RIGHT.map((src, i) => (
-              <img key={i} src={src} alt="" />
-            ))}
-          </div>
-        </>
-      )}
       <div className="header">
         <div
           className="title-wrap"
