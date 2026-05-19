@@ -212,7 +212,7 @@ export function targetFactorForElo(avgElo) {
 //       3000 → 123k         4000 → 39k (deep cuts open up at the very top)
 const MEMBERS_HI = 3_500_000; // floor at EASY_ELO (Elo 100): the ubiquitous few
 const MEMBERS_LO = 1_000;     // asymptotic floor: effectively no floor
-const HALF_LIFE_ELO = 600;    // Elo per halving of the required member count
+const HALF_LIFE_ELO = 1_100;    // Elo per halving of the required member count
 
 export function minMembersForElo(avgElo) {
   const e = Number.isFinite(avgElo) ? avgElo : EASY_ELO;

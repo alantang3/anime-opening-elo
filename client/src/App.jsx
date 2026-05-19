@@ -104,6 +104,9 @@ export default function App() {
   const [queueSleep, setQueueSleep] = useState(false);
   const [queueFound, setQueueFound] = useState(false);
   const foundHoldRef = useRef(false);
+  // Kitsune "opponent found" intermediary between queue and battle:
+  // null | "in" (covering, slightly transparent) | "up" (blinds-lift away).
+  const [foundOverlay, setFoundOverlay] = useState(null);
   const [countdown, setCountdown] = useState(0);
   const [remaining, setRemaining] = useState(1);
   const [feedback, setFeedback] = useState(null);
@@ -210,6 +213,7 @@ export default function App() {
       setOppGone(false);
       setQueueFound(false);
       foundHoldRef.current = false;
+      setFoundOverlay(null);
     });
     socket.on("queueCancelled", () => setPhase(PHASE.LOBBY));
 
@@ -226,16 +230,21 @@ export default function App() {
       setHasRemote(false);
       setPeerAV({ cam: false, mic: false });
       ensurePeer(); // ready to negotiate if either side enables A/V
-      // Stay on the SAME queue page; Mimiko just switches to the "wait" pose
-      // and holds a beat (so it registers) before the match screen comes up.
+      // 1) Same queue page: Mimiko swaps to the "wait" pose, held a beat.
       setQueueFound(true);
       foundHoldRef.current = true;
       clearTimeout(matchStartTimer.current);
       matchStartTimer.current = setTimeout(() => {
         foundHoldRef.current = false;
-        setMatchStarting(true); // curtain-reveal into the match
+        // 2) Battle UI mounts underneath; the Kitsune "opponent found"
+        //    overlay covers it (slightly transparent)…
         setPhase(PHASE.PREPARE);
-        setTimeout(() => setMatchStarting(false), 1100);
+        setFoundOverlay("in");
+        setTimeout(() => {
+          // 3) …then lifts up like a window blind, revealing the battle.
+          setFoundOverlay("up");
+          setTimeout(() => setFoundOverlay(null), 650);
+        }, 850);
       }, FOUND_HOLD_MS);
     });
 
