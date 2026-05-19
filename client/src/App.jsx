@@ -50,6 +50,9 @@ export default function App() {
   const [me, setMe] = useState(null);
   const [opponent, setOpponent] = useState(null);
   const [roundInfo, setRoundInfo] = useState(null);
+  // The round plays the AUDIO file (reliable); flips to the video on audio
+  // failure. RESULT always shows the video for the reveal.
+  const [audioFailed, setAudioFailed] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [remaining, setRemaining] = useState(1);
   const [feedback, setFeedback] = useState(null);
@@ -89,6 +92,7 @@ export default function App() {
   const unplayableSentRef = useRef(false);
   const altReqRef = useRef(false); // an alternate-video request is in flight
   const lastFailReasonRef = useRef("unplayable");
+  const watchdogRef = useRef(null); // detects "loaded but not actually playing"
   const tokenRef = useRef(localStorage.getItem(LS_TOKEN) || null);
   const tokenClientRef = useRef(null);
   const [gsiReady, setGsiReady] = useState(false);
@@ -170,7 +174,7 @@ export default function App() {
       setPhase(PHASE.PREPARE);
     });
 
-    socket.on("round:prepare", ({ round, videoUrl, dub }) => {
+    socket.on("round:prepare", ({ round, videoUrl, audioUrl, dub }) => {
       setResult(null);
       setVotes({ you: null, opponent: null });
       setOppGone(false);
@@ -178,9 +182,17 @@ export default function App() {
       setOppStatus(null);
       setQuery("");
       setNeedTap(false);
+      setAudioFailed(false);
       unplayableSentRef.current = false;
       altReqRef.current = false;
-      setRoundInfo({ round, videoUrl, dub: dub || null, durationMs: null });
+      clearTimeout(watchdogRef.current);
+      setRoundInfo({
+        round,
+        videoUrl,
+        audioUrl: audioUrl || null,
+        dub: dub || null,
+        durationMs: null,
+      });
       setPhase(PHASE.PREPARE);
     });
 
@@ -206,6 +218,7 @@ export default function App() {
       if (url) {
         setNotice(null);
         setNeedTap(false);
+        setAudioFailed(true); // alternates are video links
         setRoundInfo((prev) => (prev ? { ...prev, videoUrl: url } : prev));
       } else {
         reportUnplayable(lastFailReasonRef.current || "unplayable");
@@ -405,13 +418,12 @@ export default function App() {
     socketRef.current?.emit("roundUnplayable", { reason });
   }
 
-  // A video link wouldn't play here. Before scrapping the round, ask the
-  // server for the next version/encode of the same OP (some AnimeThemes
-  // links are dead on the CDN while others for the same song work fine).
-  // The server replies with `round:altVideo`; if it's out of alternates we
-  // escalate to reportUnplayable (→ void round + rematch).
+  // Ask the server for the next version/encode of the same OP. The server
+  // replies with `round:altVideo`; if it's out of alternates we escalate to
+  // reportUnplayable (→ void round + rematch).
   function handleVideoFail(reason) {
     if (unplayableSentRef.current || altReqRef.current) return;
+    clearTimeout(watchdogRef.current);
     altReqRef.current = true;
     lastFailReasonRef.current = reason;
     setNotice("That version wouldn't play — trying another…");
@@ -421,19 +433,50 @@ export default function App() {
     });
   }
 
+  // Single entry point for "the round media isn't playing here" (load error,
+  // play() rejected, or the stall watchdog). Cheapest fix first: if we were
+  // on the AUDIO file, fall back to this round's video locally (no server
+  // round-trip). Only if that also fails do we go to server alternates.
+  function onMediaTrouble(reason) {
+    if (unplayableSentRef.current || altReqRef.current) return;
+    clearTimeout(watchdogRef.current);
+    if (roundInfo?.audioUrl && !audioFailed) {
+      setAudioFailed(true); // src → video; the [roundSrc] effect replays it
+      return;
+    }
+    handleVideoFail(reason);
+  }
+
+  // "Loaded, no error, but not actually progressing" (silent stall / dead
+  // audio track) — the bug where it never skips and you just hear nothing.
+  function armWatchdog() {
+    clearTimeout(watchdogRef.current);
+    const v = videoRef.current;
+    if (!v) return;
+    const t0 = v.currentTime || 0;
+    watchdogRef.current = setTimeout(() => {
+      const m = videoRef.current;
+      if (!m || m.ended) return;
+      if (m.paused || m.currentTime - t0 < 0.25) onMediaTrouble("stall");
+    }, 3000);
+  }
+
   function attemptPlay() {
     const v = videoRef.current;
     if (!v) return;
     v.volume = volume;
     v.currentTime = 0;
     v.play().then(
-      () => setNeedTap(false),
+      () => {
+        setNeedTap(false);
+        armWatchdog(); // make sure it's truly producing sound
+      },
       (err) => {
         // NotAllowedError = browser autoplay policy (gesture window elapsed
         // during the countdown): a single tap fixes this, so offer it.
-        // Anything else = this encode won't play here → try another version.
+        // Anything else = this source won't play here → try a fallback.
         if (err && err.name === "NotAllowedError") setNeedTap(true);
-        else handleVideoFail("play:" + (err?.name || "unknown"));
+        else onMediaTrouble("play:" + (err?.name || "unknown"));
       }
     );
   }
@@ -458,19 +501,32 @@ export default function App() {
     if (!v) return;
     v.volume = volume;
     v.play().then(
-      () => setNeedTap(false),
-      // A real tap still failed → not autoplay policy; try another version.
-      (err) => handleVideoFail("tap:" + (err?.name || "unknown"))
+      () => {
+        setNeedTap(false);
+        armWatchdog();
+      },
+      // A real tap still failed → not autoplay policy; try a fallback.
+      (err) => onMediaTrouble("tap:" + (err?.name || "unknown"))
     );
   }
-  // When the server hands us a different version/encode mid-round, the
-  // <video> remounts (keyed on its src); replay it if the song's already on.
+  // The round plays the audio file; flips to video on audio failure; RESULT
+  // shows the video for the reveal. Keyed on this so a switch remounts.
+  const roundSrc =
+    phase === PHASE.RESULT
+      ? roundInfo?.videoUrl || null
+      : (roundInfo?.audioUrl && !audioFailed
+          ? roundInfo.audioUrl
+          : roundInfo?.videoUrl) || null;
+
+  // When the source changes mid-round (audio→video, or a server alternate),
+  // the <video> remounts (keyed on roundSrc); replay it if the song's on.
   useEffect(() => {
     if (phase === PHASE.PLAYING) attemptPlay();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roundInfo?.videoUrl]);
+  }, [roundSrc]);
   function stopTimer() {
     clearInterval(tickRef.current);
+    clearTimeout(watchdogRef.current);
     const v = videoRef.current;
     if (v) v.pause();
   }
@@ -485,7 +541,7 @@ export default function App() {
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.volume = volume;
-  }, [volume, roundInfo?.videoUrl, phase]);
+  }, [volume, roundSrc, phase]);
 
   // Bind A/V streams AFTER the <video> elements mount. They render only when
   // (camOn || micOn || hasRemote) AND not on the RESULT replay, so the
@@ -1094,21 +1150,21 @@ export default function App() {
             <div className="player-wrap">
               <video
                 ref={videoRef}
-                key={roundInfo?.videoUrl}
-                src={roundInfo?.videoUrl}
+                key={roundSrc}
+                src={roundSrc || undefined}
                 playsInline
                 controls={phase === PHASE.RESULT}
                 onLoadedMetadata={onLoadedMetadata}
                 onError={() => {
-                  if (!roundInfo?.videoUrl) return;
+                  if (!roundSrc) return;
                   // A media error on the live round (not the RESULT replay):
-                  // try another version/encode before scrapping the round.
+                  // fall back (audio→video→alternate) before scrapping it.
                   if (
                     phase === PHASE.PREPARE ||
                     phase === PHASE.COUNTDOWN ||
                     phase === PHASE.PLAYING
                   ) {
-                    handleVideoFail("mediaerror");
+                    onMediaTrouble("mediaerror");
                   }
                 }}
                 style={{

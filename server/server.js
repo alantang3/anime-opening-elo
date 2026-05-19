@@ -135,21 +135,26 @@ app.get("/api/search", async (req, res) => {
 // something to chase. They never enter matchmaking (no socket) — purely
 // display, merged with real players and sorted by Elo.
 const GHOST_PLAYERS = [
-  { id: "ghost:1", nickname: "KamiSpeed", elo: 4480, wins: 612, losses: 188 },
-  { id: "ghost:2", nickname: "OPSniper", elo: 4210, wins: 540, losses: 201 },
-  { id: "ghost:3", nickname: "SakuraBlitz", elo: 3970, wins: 498, losses: 220 },
-  { id: "ghost:4", nickname: "ZeroFrame", elo: 3760, wins: 451, losses: 209 },
-  { id: "ghost:5", nickname: "TitanEar", elo: 3540, wins: 420, losses: 233 },
-  { id: "ghost:6", nickname: "RamenGod", elo: 3320, wins: 388, losses: 241 },
-  { id: "ghost:7", nickname: "NanoDesu", elo: 3110, wins: 355, losses: 248 },
-  { id: "ghost:8", nickname: "EdTune", elo: 2890, wins: 322, losses: 257 },
-  { id: "ghost:9", nickname: "PlusUltra", elo: 2660, wins: 298, losses: 263 },
-  { id: "ghost:10", nickname: "SenpaiFM", elo: 2410, wins: 261, losses: 270 },
-  { id: "ghost:11", nickname: "GokuVibes", elo: 2180, wins: 233, losses: 271 },
-  { id: "ghost:12", nickname: "MikuMain", elo: 1940, wins: 205, losses: 268 },
-  { id: "ghost:13", nickname: "ChibiRush", elo: 1700, wins: 178, losses: 262 },
-  { id: "ghost:14", nickname: "OtakuPrime", elo: 1480, wins: 151, losses: 250 },
-  { id: "ghost:15", nickname: "LoFiLeaf", elo: 1260, wins: 124, losses: 233 },
+  { id: "ghost:1", nickname: "KamiSpeed", elo: 4520, wins: 631, losses: 182 },
+  { id: "ghost:2", nickname: "OPSniper", elo: 4390, wins: 598, losses: 191 },
+  { id: "ghost:3", nickname: "SakuraBlitz", elo: 4260, wins: 564, losses: 199 },
+  { id: "ghost:4", nickname: "ZeroFrame", elo: 4140, wins: 533, losses: 206 },
+  { id: "ghost:5", nickname: "TitanEar", elo: 4020, wins: 505, losses: 214 },
+  { id: "ghost:6", nickname: "RamenGod", elo: 3900, wins: 478, losses: 221 },
+  { id: "ghost:7", nickname: "NanoDesu", elo: 3780, wins: 452, losses: 228 },
+  { id: "ghost:8", nickname: "EdTune", elo: 3660, wins: 427, losses: 236 },
+  { id: "ghost:9", nickname: "PlusUltra", elo: 3540, wins: 403, losses: 243 },
+  { id: "ghost:10", nickname: "SenpaiFM", elo: 3420, wins: 380, losses: 250 },
+  { id: "ghost:11", nickname: "GokuVibes", elo: 3300, wins: 358, losses: 257 },
+  { id: "ghost:12", nickname: "MikuMain", elo: 3180, wins: 337, losses: 264 },
+  { id: "ghost:13", nickname: "ChibiRush", elo: 3060, wins: 317, losses: 271 },
+  { id: "ghost:14", nickname: "OtakuPrime", elo: 2950, wins: 298, losses: 277 },
+  { id: "ghost:15", nickname: "LoFiLeaf", elo: 2840, wins: 280, losses: 283 },
+  { id: "ghost:16", nickname: "AceQuill", elo: 2730, wins: 263, losses: 289 },
+  { id: "ghost:17", nickname: "NovaBeat", elo: 2620, wins: 247, losses: 294 },
+  { id: "ghost:18", nickname: "RoninLoop", elo: 2520, wins: 232, losses: 299 },
+  { id: "ghost:19", nickname: "HikariWave", elo: 2420, wins: 218, losses: 303 },
+  { id: "ghost:20", nickname: "DubLordX", elo: 2320, wins: 205, losses: 307 },
 ];
 
 app.get("/api/leaderboard", (_req, res) => {
@@ -393,6 +398,7 @@ async function startRound(match) {
   io.to(match.id).emit("round:prepare", {
     round: match.round,
     videoUrl: opening.video.link,
+    audioUrl: opening.audioUrl || null,
     dub: match.dub?.label || null,
   });
 

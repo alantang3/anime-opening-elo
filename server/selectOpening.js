@@ -80,6 +80,9 @@ async function enrich(e, target, chosenFactor) {
     song: e.song,
     theme: e.theme,
     video,
+    // Dub override swaps in a different (English) video → its audio wouldn't
+    // match, so fall back to that video for dub franchises.
+    audioUrl: dub ? null : e.audio || null,
     malId: e.malId,
     popularity: e.popularity,
     accepted,
@@ -123,6 +126,7 @@ export async function pickOpeningForElo(avgElo) {
         song: row.song ? { title: row.song } : null,
         theme: row.themeSlug ? { slug: row.themeSlug } : null,
         video: { link: row.videoLink },
+        audioUrl: row.audioLink || null,
         malId: row.malId,
         popularity: {
           members: row.members,

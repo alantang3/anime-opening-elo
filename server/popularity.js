@@ -13,6 +13,7 @@
 import { getCachedPopularity, cachePopularity } from "./db.js";
 
 const JIKAN = "https://api.jikan.moe/v4/anime";
+const JIKAN_TOP = "https://api.jikan.moe/v4/top/anime";
 const USER_AGENT = "anime-opening-elo/1.0 (multiplayer anime OP guessing game)";
 
 // Cached rows older than this are treated as stale and refreshed opportunistically.
@@ -60,6 +61,47 @@ async function fetchJikan(malId) {
       title: data?.title ?? null,
       titles: [...new Set(titles)],
     };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// One page of MAL's by-popularity ranking (most members first). Drives the
+// ingester so the pool fills in the SAME order the difficulty floor uses —
+// no random sampling, no hardcoded titles. Each entry is cached into
+// mal_popularity so getPopularity() is warm (zero extra Jikan calls later).
+// Returns { entries, hasNext }.
+export async function getPopularityPage(page = 1) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const r = await fetch(`${JIKAN_TOP}?filter=bypopularity&page=${page}`, {
+      headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+      signal: ctrl.signal,
+    });
+    if (!r.ok) throw new Error(`Jikan top ${r.status}`);
+    const json = await r.json();
+    const entries = [];
+    for (const d of json?.data || []) {
+      const malId = d?.mal_id;
+      if (!malId) continue;
+      const titles = [
+        d?.title,
+        d?.title_english,
+        d?.title_japanese,
+        ...(d?.titles || []).map((t) => t?.title),
+        ...(d?.title_synonyms || []),
+      ].filter((s) => s && String(s).trim());
+      const info = {
+        members: d?.members ?? null,
+        score: d?.score ?? null,
+        title: d?.title ?? null,
+        titles: [...new Set(titles)],
+      };
+      if (info.members != null) cachePopularity({ malId, ...info });
+      entries.push({ malId, ...info });
+    }
+    return { entries, hasNext: !!json?.pagination?.has_next_page };
   } finally {
     clearTimeout(timer);
   }

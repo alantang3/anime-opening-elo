@@ -107,6 +107,7 @@ ensureColumn("players", "google_sub", "TEXT"); // Google account id (stable)
 ensureColumn("players", "avatar", "TEXT");
 ensureColumn("players", "avatar_is_custom", "INTEGER"); // user-uploaded pic
 ensureColumn("players", "peak_elo", "REAL"); // highest Elo ever reached
+ensureColumn("openings", "audio_link", "TEXT"); // direct .ogg song (preferred)
 db.exec(`UPDATE players SET peak_elo = elo WHERE peak_elo IS NULL`);
 db.exec(
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_google
@@ -127,6 +128,14 @@ if (process.env.RESET_ELO === "1") {
     )
     .run().changes;
   console.log(`RESET_ELO: reset ${n} player(s) to ${DEFAULT_ELO} Elo`);
+}
+
+// One-time opt-in: set RESET_POOL=1 to wipe the openings pool (then remove
+// the env var). The ingester rebuilds it from scratch in popularity order,
+// so this clears stale rows left by the old random-sampling fill.
+if (process.env.RESET_POOL === "1") {
+  const n = db.prepare(`DELETE FROM openings`).run().changes;
+  console.log(`RESET_POOL: cleared ${n} pooled opening(s)`);
 }
 
 const nowISO = () => new Date().toISOString();
@@ -215,31 +224,44 @@ const stmt = {
   upsertOpening: db.prepare(`
     INSERT INTO openings
       (anime_id, theme_slug, anime_slug, anime_name, year, song, video_link,
-       mal_id, members, score, factor, franchise, franchise_key, accepted,
-       dub_label, updated_at)
+       audio_link, mal_id, members, score, factor, franchise, franchise_key,
+       accepted, dub_label, updated_at)
     VALUES
       (@anime_id, @theme_slug, @anime_slug, @anime_name, @year, @song,
-       @video_link, @mal_id, @members, @score, @factor, @franchise,
-       @franchise_key, @accepted, @dub_label, @now)
+       @video_link, @audio_link, @mal_id, @members, @score, @factor,
+       @franchise, @franchise_key, @accepted, @dub_label, @now)
     ON CONFLICT(anime_id, theme_slug) DO UPDATE SET
-      video_link=@video_link, mal_id=@mal_id, members=@members,
-      score=@score, factor=@factor, franchise=@franchise,
+      video_link=@video_link, audio_link=@audio_link, mal_id=@mal_id,
+      members=@members, score=@score, factor=@factor, franchise=@franchise,
       franchise_key=@franchise_key, accepted=@accepted,
       dub_label=@dub_label, anime_name=@anime_name, song=@song,
       year=@year, updated_at=@now
   `),
   countOpenings: db.prepare(`SELECT COUNT(*) AS n FROM openings`),
-  // Closest to the difficulty target among shows that clear the members
-  // floor; LIMIT gives a small band we then randomise over for variety.
-  bandByFloor: db.prepare(`
-    SELECT * FROM openings
+  // Selection is weighted by SHOW, not by opening: a band of distinct anime
+  // (those clearing the members floor, closest to the difficulty target),
+  // which the caller picks uniformly from and then draws ONE random OP of —
+  // so a 9-OP show isn't 9× likelier than a 2-OP show.
+  bandAnimeByFloor: db.prepare(`
+    SELECT anime_id, MIN(factor) AS factor
+      FROM openings
      WHERE members >= @minMembers
-     ORDER BY ABS(factor - @target) ASC
+     GROUP BY anime_id
+     ORDER BY ABS(MIN(factor) - @target) ASC
      LIMIT @limit
   `),
-  // Fallback when nothing clears the floor: the most popular we have.
-  mostPopular: db.prepare(`
-    SELECT * FROM openings ORDER BY members DESC LIMIT @limit
+  // Fallback when no show clears the floor: the most popular shows we have.
+  mostPopularAnime: db.prepare(`
+    SELECT anime_id
+      FROM openings
+     GROUP BY anime_id
+     ORDER BY MAX(members) DESC
+     LIMIT @limit
+  `),
+  randomOpeningOfAnime: db.prepare(`
+    SELECT * FROM openings
+     WHERE anime_id = @animeId AND members >= @minMembers
+     ORDER BY RANDOM() LIMIT 1
   `),
   // Pool rows whose members froze NULL but whose show is now known in the
   // popularity cache (a later pull succeeded for that mal_id).
@@ -406,6 +428,7 @@ export function upsertOpening(row) {
     year: row.year ?? null,
     song: row.song ?? null,
     video_link: row.videoLink,
+    audio_link: row.audioLink ?? null,
     mal_id: row.malId ?? null,
     members: Number.isFinite(row.members) ? row.members : null,
     score: row.score ?? null,
@@ -422,14 +445,25 @@ export function poolSize() {
   return stmt.countOpenings.get().n;
 }
 
-// Pick a ready-to-serve opening for the given difficulty. Prefers shows above
-// the members floor closest to `target`, randomised over a small band for
-// variety; relaxes to the most popular pooled show if none clear the floor.
+// Pick a ready-to-serve opening for the given difficulty. Picks a SHOW first
+// (uniformly, from a band of distinct anime nearest the difficulty target
+// that clear the members floor), then ONE random OP of that show — so shows
+// with many openings don't dominate. Relaxes to the most popular shows if
+// none clear the floor.
 export function pickPooledOpening({ minMembers, target, band = 25 }) {
-  let rows = stmt.bandByFloor.all({ minMembers, target, limit: band });
-  if (!rows.length) rows = stmt.mostPopular.all({ limit: band });
-  if (!rows.length) return null;
-  const r = rows[Math.floor(Math.random() * rows.length)];
+  let animeRows = stmt.bandAnimeByFloor.all({ minMembers, target, limit: band });
+  let floorForPick = minMembers;
+  if (!animeRows.length) {
+    animeRows = stmt.mostPopularAnime.all({ limit: band });
+    floorForPick = 0; // fallback: ignore the floor entirely
+  }
+  if (!animeRows.length) return null;
+  const a = animeRows[Math.floor(Math.random() * animeRows.length)];
+  const r = stmt.randomOpeningOfAnime.get({
+    animeId: a.anime_id,
+    minMembers: floorForPick,
+  });
+  if (!r) return null;
   return {
     animeId: r.anime_id,
     animeName: r.anime_name,
@@ -438,6 +472,7 @@ export function pickPooledOpening({ minMembers, target, band = 25 }) {
     year: r.year,
     song: r.song,
     videoLink: r.video_link,
+    audioLink: r.audio_link,
     malId: r.mal_id,
     members: r.members,
     score: r.score,

@@ -49,7 +49,7 @@ export async function getOpeningCandidates(pageSize = 20) {
   const url =
     `${BASE}/animetheme` +
     `?filter[type]=OP` +
-    `&include=anime,song,animethemeentries.videos` +
+    `&include=anime,song,animethemeentries.videos.audio` +
     `&page[size]=${pageSize}` +
     `&sort=random`;
   const data = await fetchJSON(url);
@@ -63,7 +63,13 @@ export async function getOpeningCandidates(pageSize = 20) {
         (a, b) => (b.resolution || 0) - (a.resolution || 0)
       )[0];
       if (!video?.link) continue;
-      out.push({ anime: t.anime, song: t.song, theme: t, video });
+      out.push({
+        anime: t.anime,
+        song: t.song,
+        theme: t,
+        video,
+        audio: video.audio?.link || null,
+      });
       break; // one entry per theme is enough
     }
   }
@@ -129,6 +135,64 @@ export async function getThemeVideoLinks(animeSlug, themeSlug) {
     return [...new Set([...same, ...other])];
   } catch {
     return [];
+  }
+}
+
+// Resolve a MAL id to its AnimeThemes slug via the resource endpoint
+// (confirmed reliable: MAL 16498 → "shingeki_no_kyojin"). null if AnimeThemes
+// has no entry for that MAL id (e.g. a movie / not catalogued).
+export async function animeSlugForMalId(malId) {
+  if (!malId) return null;
+  try {
+    const data = await fetchJSON(
+      `${BASE}/resource` +
+        `?filter%5Bsite%5D=MyAnimeList` +
+        `&filter%5Bexternal_id%5D=${encodeURIComponent(malId)}` +
+        `&include=anime`
+    );
+    for (const res of data.resources || []) {
+      const a = (res.anime || [])[0];
+      if (a?.slug) return a.slug;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// One specific anime (by slug) with its id/name/year and every OP theme
+// (best encode + song title each). Used to seed the pool with a curated list
+// of famous shows so they're guaranteed present, not left to random sampling.
+export async function getAnimeOpenings(slug) {
+  if (!slug) return null;
+  try {
+    const data = await fetchJSON(
+      `${BASE}/anime/${encodeURIComponent(slug)}` +
+        `?include=animethemes.song,animethemes.animethemeentries.videos.audio`
+    );
+    const a = data.anime;
+    if (!a) return null;
+    const themes = [];
+    for (const t of a.animethemes || []) {
+      if (t.type !== "OP") continue;
+      for (const entry of t.animethemeentries || []) {
+        const v = [...(entry.videos || [])].sort(
+          (x, y) => (y.resolution || 0) - (x.resolution || 0)
+        )[0];
+        if (v?.link) {
+          themes.push({
+            slug: t.slug,
+            song: t.song?.title || null,
+            link: v.link,
+            audio: v.audio?.link || null, // direct .ogg song (preferred)
+          });
+          break;
+        }
+      }
+    }
+    return { anime: { id: a.id, name: a.name, slug: a.slug, year: a.year }, themes };
+  } catch {
+    return null;
   }
 }
 
