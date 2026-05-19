@@ -1170,29 +1170,29 @@ button.danger:hover:not(:disabled) {
 .lobby { text-align: center; padding: 8px 0 4px; }
 .lobby-ava-ro { cursor: default; }
 
-/* Nyalea on top (transparent PNG, blends into the card), then the Play /
-   Invite block UNDER her — compact so it all fits without scrolling. */
+/* Nyalea up top, the Play / Invite buttons tucked close beneath her and
+   tilted toward each other. */
 .play-stage {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  margin: 10px auto 0;
+  margin: 8px auto 0;
 }
 .play-stage .nyalea {
   display: block;
-  width: clamp(160px, 22vh, 240px);
+  width: clamp(240px, 40vh, 400px);
   height: auto;
   user-select: none;
   -webkit-user-drag: none;
-  filter: drop-shadow(0 0 30px rgba(139, 92, 246, 0.35))
-    drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45));
+  filter: drop-shadow(0 0 34px rgba(139, 92, 246, 0.38))
+    drop-shadow(0 16px 26px rgba(0, 0, 0, 0.45));
 }
 .play-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  gap: clamp(8px, 3vw, 28px);
+  gap: 0;
+  margin-top: -10px; /* tuck right under her */
 }
 .play-art {
   flex: none;
@@ -1207,70 +1207,83 @@ button.danger:hover:not(:disabled) {
 }
 .play-art img {
   display: block;
-  width: clamp(120px, 17vh, 190px);
+  width: clamp(180px, 27vh, 290px);
   height: auto;
 }
+.play-actions .play-art:first-child {
+  transform: rotate(-9deg);
+  margin-right: -14px;
+}
+.play-actions .play-art:last-child {
+  transform: rotate(9deg);
+  margin-left: -14px;
+}
 .play-art:hover:not(:disabled) {
-  transform: scale(1.09);
-  filter: drop-shadow(0 0 22px color-mix(in srgb, var(--accent) 60%, transparent))
+  filter: drop-shadow(0 0 24px color-mix(in srgb, var(--accent) 60%, transparent))
     drop-shadow(0 12px 20px rgba(0, 0, 0, 0.5));
+}
+.play-actions .play-art:first-child:hover:not(:disabled) {
+  transform: rotate(-9deg) scale(1.08);
+  z-index: 1;
+}
+.play-actions .play-art:last-child:hover:not(:disabled) {
+  transform: rotate(9deg) scale(1.08);
+  z-index: 1;
 }
 .play-art:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* ---------- Queue screen: full-screen Mimiko ---------- */
+/* ---------- Queue: normal-sized Mimiko at the top of the page ---------- */
 .queue-screen {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  background: var(--bg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  text-align: center;
+  padding: 6px 0 24px;
 }
 .queue-mimiko {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  display: block;
+  width: clamp(220px, 38vh, 360px);
+  height: auto;
+  margin: 0 auto;
   user-select: none;
   -webkit-user-drag: none;
+  filter: drop-shadow(0 0 30px rgba(139, 92, 246, 0.32))
+    drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45));
 }
 .queue-cancel {
-  position: fixed;
-  left: 50%;
-  bottom: 28px;
-  transform: translateX(-50%);
+  margin: 18px auto 0;
   flex: none;
   width: auto;
   padding: 9px 22px;
-  background: rgba(8, 7, 12, 0.6);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 13px;
   font-weight: 700;
-  backdrop-filter: blur(4px);
 }
 .queue-cancel:hover:not(:disabled) {
   filter: none;
   background: rgba(242, 84, 91, 0.85);
+  color: #fff;
   border-color: transparent;
 }
 
-/* Split-second "found" flash over everything before the match shows. */
+/* Split-second "found" splash: normal-sized image on a dim backdrop. */
 .found-flash {
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: var(--bg);
+  background: rgba(8, 7, 12, 0.82);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 24px;
   animation: foundPop 0.8s ease both;
 }
 .found-flash img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  max-width: min(70vw, 400px);
+  max-height: 68vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
 }
