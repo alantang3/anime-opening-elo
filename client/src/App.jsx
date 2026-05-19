@@ -1433,8 +1433,13 @@ export default function App() {
           <h3>Leaderboard</h3>
           {board.map((p, i) => {
             const title = leaderboardTitle(i);
+            const rank = rankForElo(p.elo);
             return (
-              <div className="history-row" key={p.id}>
+              <div
+                className="history-row"
+                key={p.id}
+                style={{ "--rank": rank.color }}
+              >
                 <div className="name">
                   {i + 1}. {p.nickname}
                   {title && (

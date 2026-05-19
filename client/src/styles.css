@@ -269,28 +269,41 @@ button.danger:hover:not(:disabled) {
   letter-spacing: 0.12em;
   margin: 0 0 10px;
 }
+/* Each row is tinted with that player's RANK colour (via --rank set inline),
+   with a colour-matched left edge — not a fixed purple. */
 .history-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 11px 10px;
-  border-bottom: 1px solid var(--border-soft);
+  padding: 11px 12px;
+  margin-bottom: 4px;
+  border: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 28%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--rank, var(--accent)) 80%, transparent);
   font-size: 14px;
   border-radius: 8px;
-  counter-increment: lb;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--rank, var(--accent)) 20%, var(--panel)),
+    color-mix(in srgb, var(--rank, var(--accent)) 7%, var(--panel))
+  );
 }
-.history-row:last-child { border-bottom: none; }
-.history-row:hover { background: var(--panel-2); }
-.history-row .name { color: var(--text); font-weight: 600; }
+.history-row:last-child { margin-bottom: 0; }
+.history-row:hover {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--rank, var(--accent)) 30%, var(--panel)),
+    color-mix(in srgb, var(--rank, var(--accent)) 12%, var(--panel))
+  );
+}
+.history-row .name {
+  color: color-mix(in srgb, var(--rank, var(--accent)) 70%, #ffffff);
+  font-weight: 700;
+}
 .history-row .meta {
-  color: var(--muted);
+  color: rgba(255, 255, 255, 0.7);
   font-variant-numeric: tabular-nums;
   font-size: 13px;
 }
-/* Top 3 get the accent, like a real ladder. */
-.history-row:nth-child(2) .name { color: var(--accent-strong); }
-.history-row:nth-child(3) .name,
-.history-row:nth-child(4) .name { color: #fff; }
 
 .footer-note {
   margin-top: 24px;
@@ -622,9 +635,9 @@ button.danger:hover:not(:disabled) {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   vertical-align: middle;
-  background: var(--accent-dim);
-  color: var(--accent-strong);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--rank, var(--accent)) 22%, transparent);
+  color: color-mix(in srgb, var(--rank, var(--accent)) 60%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 50%, transparent);
 }
 .lb-title-king {
   background: linear-gradient(180deg, #ffe89e, #f5b301);
