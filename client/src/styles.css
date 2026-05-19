@@ -1249,6 +1249,27 @@ button.danger:hover:not(:disabled) {
     drop-shadow(0 12px 20px rgba(0, 0, 0, 0.4));
 }
 .queue-figure .qm.on { opacity: 1; }
+/* Live opponent Elo, laid over kitsune's baked "ELO opponent found." bar
+   (the box sits at a fixed spot in the shared canvas, so % is exact). */
+.kitsune-elo {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: 70.6%;
+  width: 31%;
+  height: 12.4%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fdeef1;
+  border: 1px solid #f1c6d3;
+  border-radius: 999px;
+  color: #9a5a73;
+  font-weight: 700;
+  font-size: clamp(9px, 1.7vh, 15px);
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
 .queue-cancel {
   display: block;
   margin: 14px auto 0;

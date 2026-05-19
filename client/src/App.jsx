@@ -1317,9 +1317,14 @@ export default function App() {
               />
               <img
                 className={"qm" + (queueFound ? " on" : "")}
-                src="/mimikowait.png"
+                src="/kitsune.png"
                 alt=""
               />
+              {queueFound && (
+                <span className="kitsune-elo">
+                  {opponent?.elo ?? "?"} ELO opponent found
+                </span>
+              )}
             </div>
             {!queueFound && (
               <button
