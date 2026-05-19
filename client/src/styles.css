@@ -75,6 +75,8 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+  cursor: pointer;
+  user-select: none;
 }
 .app-icon {
   width: 42px;
@@ -635,9 +637,11 @@ button.danger:hover:not(:disabled) {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   vertical-align: middle;
-  background: color-mix(in srgb, var(--rank, var(--accent)) 22%, transparent);
-  color: color-mix(in srgb, var(--rank, var(--accent)) 60%, #ffffff);
-  border: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 50%, transparent);
+  /* Solid pill in the player's rank colour — not a transparent tint. */
+  background: var(--rank, var(--accent));
+  color: #0a0712;
+  border: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 55%, #000);
+  box-shadow: 0 1px 8px -2px color-mix(in srgb, var(--rank, var(--accent)) 70%, transparent);
 }
 .lb-title-king {
   background: linear-gradient(180deg, #ffe89e, #f5b301);
@@ -1092,4 +1096,164 @@ button.danger:hover:not(:disabled) {
 .side-rail img:nth-child(3) { z-index: 1; transform: translateY(16px); }
 @media (min-width: 1300px) {
   .side-rail { display: flex; }
+}
+
+/* ---------- Header user menu (Profile / Statistics / Sign out) ---------- */
+.user-menu { position: relative; flex: none; }
+.user-menu .rating-pill {
+  flex: none;
+  width: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 6px 12px 6px 7px;
+  font-weight: 600;
+}
+.user-menu .rating-pill:hover:not(:disabled) {
+  filter: none;
+  background: var(--panel-2);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft));
+}
+.pill-caret { color: var(--muted); font-size: 11px; margin-left: 2px; }
+
+.menu-backdrop { position: fixed; inset: 0; z-index: 40; }
+.user-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 41;
+  min-width: 196px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  box-shadow: 0 20px 48px -18px rgba(0, 0, 0, 0.85);
+}
+.user-dropdown button {
+  flex: none;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.user-dropdown button:hover:not(:disabled) {
+  filter: none;
+  background: var(--panel-2);
+}
+.user-dropdown .dd-danger { color: var(--danger); }
+.user-dropdown .dd-danger:hover:not(:disabled) {
+  background: rgba(242, 84, 91, 0.12);
+}
+
+/* ---------- Modals (Profile / Statistics) ---------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(4, 3, 8, 0.72);
+}
+.modal {
+  width: 100%;
+  max-width: 460px;
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 22px;
+  box-shadow: 0 30px 70px -26px rgba(0, 0, 0, 0.85);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.modal-head h3 { margin: 0; font-size: 18px; }
+.modal-x {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.modal-x:hover:not(:disabled) {
+  filter: none;
+  color: var(--text);
+  background: var(--elev);
+}
+.profile-ava { display: flex; justify-content: center; margin-bottom: 18px; }
+.modal .name-editor { margin: 0; }
+
+/* ---------- Lobby: identity + nyalea play stage ---------- */
+.lobby { text-align: center; padding: 18px 0 4px; }
+.lobby-ava-ro { cursor: default; }
+
+.play-stage {
+  position: relative;
+  display: inline-block;
+  margin: 20px auto 0;
+}
+.play-stage .nyalea {
+  display: block;
+  width: clamp(240px, 42vw, 440px);
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 26px 44px rgba(0, 0, 0, 0.55));
+}
+.play-art {
+  position: absolute;
+  bottom: -4%;
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: transform 0.16s ease, filter 0.16s ease;
+  filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.5));
+}
+.play-art img {
+  display: block;
+  width: clamp(118px, 21vw, 188px);
+  height: auto;
+}
+.play-left { left: -11%; transform: rotate(-3deg); }
+.play-right { right: -11%; transform: rotate(3deg); }
+.play-art:hover:not(:disabled) {
+  filter: drop-shadow(0 0 26px color-mix(in srgb, var(--accent) 60%, transparent))
+    drop-shadow(0 14px 24px rgba(0, 0, 0, 0.55));
+}
+.play-left:hover:not(:disabled) { transform: rotate(-3deg) scale(1.13); }
+.play-right:hover:not(:disabled) { transform: rotate(3deg) scale(1.13); }
+.play-art:disabled { opacity: 0.5; cursor: not-allowed; }
+
+@media (max-width: 560px) {
+  .play-left { left: -6%; }
+  .play-right { right: -6%; }
 }

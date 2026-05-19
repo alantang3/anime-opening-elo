@@ -116,7 +116,8 @@ export default function App() {
   const [rankUp, setRankUp] = useState(null); // {name,color} on tier-up
   const rankUpTimer = useRef(null);
   const [stats, setStats] = useState(null);
-  const [showStats, setShowStats] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false); // header dropdown
+  const [panel, setPanel] = useState(null); // null | "profile" | "stats"
   const [avatarBusy, setAvatarBusy] = useState(false);
   const avatarInputRef = useRef(null);
   // Invite code from a ?invite= link, joined once we're authed.
@@ -790,6 +791,13 @@ export default function App() {
   }
 
   // ---------- Actions ----------
+  const goHome = () => {
+    if (!me) return;
+    if (phase === PHASE.QUEUE) cancelQueue();
+    else if (phase === PHASE.INVITING) cancelInvite();
+    else if (inMatch) leaveMatch();
+    setPhase(PHASE.LOBBY);
+  };
   const findMatch = () => socketRef.current?.emit("queue");
   const cancelQueue = () => socketRef.current?.emit("cancelQueue");
   const leaveMatch = () => socketRef.current?.emit("leaveMatch");
@@ -841,11 +849,17 @@ export default function App() {
       setStats(r);
     } catch {}
   }
-  function toggleStats() {
-    const next = !showStats;
-    setShowStats(next);
-    if (next) loadStats();
+  function openProfile() {
+    setNameDraft(me?.nickname || "");
+    setPanel("profile");
+    setMenuOpen(false);
   }
+  function openStats() {
+    loadStats();
+    setPanel("stats");
+    setMenuOpen(false);
+  }
+  const closePanel = () => setPanel(null);
   const inviteUrl = inviteCode
     ? `${window.location.origin}/?invite=${inviteCode}`
     : "";
@@ -930,44 +944,70 @@ export default function App() {
         </>
       )}
       <div className="header">
-        <div className="title-wrap">
+        <div
+          className="title-wrap"
+          onClick={goHome}
+          role="button"
+          title="Home"
+        >
           <img src="/anitune.png" alt="AniTune" className="app-icon" />
           <div className="title">
             Ani<span>Tune</span>
           </div>
         </div>
         {me && (
-          <div className="rating-pill">
-            {me.avatar ? (
-              <img className="avatar" src={me.avatar} alt="" referrerPolicy="no-referrer" />
-            ) : (
-              <span className="avatar avatar-fallback">
-                {initialOf(me.nickname)}
-              </span>
-            )}
-            <div className="pill-info">
-              <span className="pill-name">
-                {me.nickname}
-                {myTitle && (
-                  <span
-                    className={
-                      "lb-title" + (myBoardIndex === 0 ? " lb-title-king" : "")
-                    }
-                  >
-                    {myTitle}
-                  </span>
-                )}
-              </span>
-              <span
-                className="rank-badge"
-                style={{ color: rankForElo(me.elo).color }}
-              >
-                {rankForElo(me.elo).name} · {me.elo}
-              </span>
-            </div>
-            <button className="signout" onClick={signOut} title="Sign out">
-              ⏻
+          <div className="user-menu">
+            <button
+              className="rating-pill"
+              onClick={() => setMenuOpen((o) => !o)}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+            >
+              {me.avatar ? (
+                <img className="avatar" src={me.avatar} alt="" referrerPolicy="no-referrer" />
+              ) : (
+                <span className="avatar avatar-fallback">
+                  {initialOf(me.nickname)}
+                </span>
+              )}
+              <div className="pill-info">
+                <span className="pill-name">
+                  {me.nickname}
+                  {myTitle && (
+                    <span
+                      className={
+                        "lb-title" +
+                        (myBoardIndex === 0 ? " lb-title-king" : "")
+                      }
+                    >
+                      {myTitle}
+                    </span>
+                  )}
+                </span>
+                <span
+                  className="rank-badge"
+                  style={{ color: rankForElo(me.elo).color }}
+                >
+                  {rankForElo(me.elo).name} · {me.elo}
+                </span>
+              </div>
+              <span className="pill-caret">{menuOpen ? "▴" : "▾"}</span>
             </button>
+            {menuOpen && (
+              <>
+                <div
+                  className="menu-backdrop"
+                  onClick={() => setMenuOpen(false)}
+                />
+                <div className="user-dropdown" role="menu">
+                  <button onClick={openProfile}>Profile</button>
+                  <button onClick={openStats}>Statistics</button>
+                  <button className="dd-danger" onClick={signOut}>
+                    ⏻ Sign out
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -986,49 +1026,16 @@ export default function App() {
         </div>
       )}
 
-      <div className="card">
-        {/* ---------- Sign in ---------- */}
-        {phase === PHASE.AUTH && (
-          <div className="hero">
-            <div className="hero-title">
-              Ani<span>Tune</span>
+      {panel === "profile" && (
+        <div className="modal-backdrop" onClick={closePanel}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Profile</h3>
+              <button className="modal-x" onClick={closePanel}>
+                ✕
+              </button>
             </div>
-            <div className="hero-sub">
-              Battle players. Guess faster. Climb&nbsp;ELO.
-            </div>
-            {googleClientId === "" ? (
-              <div className="notice" style={{ marginTop: 22 }}>
-                Google sign-in isn’t configured yet — set{" "}
-                <code>GOOGLE_CLIENT_ID</code> on the server.
-              </div>
-            ) : (
-              <>
-                <button
-                  className="gsign"
-                  onClick={signInWithGoogle}
-                  disabled={!gsiReady}
-                >
-                  <svg className="gsign-g" viewBox="0 0 48 48" aria-hidden="true">
-                    <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.9 2.4 30.4 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.2C12.3 13.3 17.6 9.5 24 9.5z"/>
-                    <path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.1 5.3-4.6 7l7.1 5.5c4.2-3.9 6.6-9.6 6.6-17z"/>
-                    <path fill="#FBBC05" d="M10.5 28.4c-.5-1.4-.7-2.9-.7-4.4s.3-3 .7-4.4l-7.9-6.2C1 16.6 0 20.2 0 24s1 7.4 2.6 10.6l7.9-6.2z"/>
-                    <path fill="#34A853" d="M24 48c6.4 0 11.9-2.1 15.9-5.8l-7.1-5.5c-2 1.3-4.6 2.1-8.8 2.1-6.4 0-11.7-3.8-13.5-9.4l-7.9 6.2C6.5 42.6 14.6 48 24 48z"/>
-                  </svg>
-                  {gsiReady ? "Sign in with Google" : "Loading…"}
-                </button>
-                <div className="hero-note">
-                  Sign in so your Elo, rank, and leaderboard spot stay with
-                  your account.
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* ---------- Lobby ---------- */}
-        {phase === PHASE.LOBBY && (
-          <div style={{ textAlign: "center", padding: "28px 0" }}>
-            <div className="lobby-id">
+            <div className="profile-ava">
               <div
                 className="lobby-ava"
                 onClick={() => avatarInputRef.current?.click()}
@@ -1055,27 +1062,7 @@ export default function App() {
                   e.target.value = "";
                 }}
               />
-              <p style={{ margin: "10px 0 0" }}>
-                Welcome back, <strong>{me?.nickname}</strong>
-              </p>
-              <span
-                className="rank-badge"
-                style={{ color: rankForElo(me?.elo).color }}
-              >
-                {rankForElo(me?.elo).name} · {me?.elo} Elo
-              </span>
-              {myTitle && (
-                <span
-                  className={
-                    "lb-title lb-title-block" +
-                    (myBoardIndex === 0 ? " lb-title-king" : "")
-                  }
-                >
-                  ★ {myTitle}
-                </span>
-              )}
             </div>
-
             <div className="name-editor">
               <label>Username</label>
               <div className="name-row">
@@ -1098,31 +1085,22 @@ export default function App() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
 
-            <p style={{ color: "var(--muted)", marginTop: 20 }}>
-              Battle players. Guess faster. Climb ELO.
-            </p>
-            <div
-              className="button-row"
-              style={{ maxWidth: 360, margin: "16px auto 0" }}
-            >
-              <button onClick={findMatch} disabled={!connected}>
-                {connected ? "Find a match" : "Connecting…"}
-              </button>
-              <button
-                className="secondary"
-                onClick={createInvite}
-                disabled={!connected}
-              >
-                Play a friend
+      {panel === "stats" && (
+        <div className="modal-backdrop" onClick={closePanel}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Statistics</h3>
+              <button className="modal-x" onClick={closePanel}>
+                ✕
               </button>
             </div>
-
-            <button className="link-btn" onClick={toggleStats}>
-              {showStats ? "Hide stats" : "Stats & recent matches"}
-            </button>
-
-            {showStats && stats && (
+            {!stats ? (
+              <div className="muted-row">Loading…</div>
+            ) : (
               <div className="stats">
                 <div className="stat-grid">
                   <div className="stat">
@@ -1184,6 +1162,104 @@ export default function App() {
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      <div className="card">
+        {/* ---------- Sign in ---------- */}
+        {phase === PHASE.AUTH && (
+          <div className="hero">
+            <div className="hero-title">
+              Ani<span>Tune</span>
+            </div>
+            <div className="hero-sub">
+              Battle players. Guess faster. Climb&nbsp;ELO.
+            </div>
+            {googleClientId === "" ? (
+              <div className="notice" style={{ marginTop: 22 }}>
+                Google sign-in isn’t configured yet — set{" "}
+                <code>GOOGLE_CLIENT_ID</code> on the server.
+              </div>
+            ) : (
+              <>
+                <button
+                  className="gsign"
+                  onClick={signInWithGoogle}
+                  disabled={!gsiReady}
+                >
+                  <svg className="gsign-g" viewBox="0 0 48 48" aria-hidden="true">
+                    <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.9 2.4 30.4 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.2C12.3 13.3 17.6 9.5 24 9.5z"/>
+                    <path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.1 5.3-4.6 7l7.1 5.5c4.2-3.9 6.6-9.6 6.6-17z"/>
+                    <path fill="#FBBC05" d="M10.5 28.4c-.5-1.4-.7-2.9-.7-4.4s.3-3 .7-4.4l-7.9-6.2C1 16.6 0 20.2 0 24s1 7.4 2.6 10.6l7.9-6.2z"/>
+                    <path fill="#34A853" d="M24 48c6.4 0 11.9-2.1 15.9-5.8l-7.1-5.5c-2 1.3-4.6 2.1-8.8 2.1-6.4 0-11.7-3.8-13.5-9.4l-7.9 6.2C6.5 42.6 14.6 48 24 48z"/>
+                  </svg>
+                  {gsiReady ? "Sign in with Google" : "Loading…"}
+                </button>
+                <div className="hero-note">
+                  Sign in so your Elo, rank, and leaderboard spot stay with
+                  your account.
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ---------- Lobby ---------- */}
+        {phase === PHASE.LOBBY && (
+          <div className="lobby">
+            <div className="lobby-id">
+              <div className="lobby-ava lobby-ava-ro">
+                {me?.avatar ? (
+                  <img src={me.avatar} alt="" referrerPolicy="no-referrer" />
+                ) : (
+                  <span className="avatar-fallback">
+                    {initialOf(me?.nickname)}
+                  </span>
+                )}
+              </div>
+              <p style={{ margin: "10px 0 0" }}>
+                Welcome back, <strong>{me?.nickname}</strong>
+              </p>
+              <span
+                className="rank-badge"
+                style={{ color: rankForElo(me?.elo).color }}
+              >
+                {rankForElo(me?.elo).name} · {me?.elo} Elo
+              </span>
+              {myTitle && (
+                <span
+                  className={
+                    "lb-title lb-title-block" +
+                    (myBoardIndex === 0 ? " lb-title-king" : "")
+                  }
+                >
+                  ★ {myTitle}
+                </span>
+              )}
+            </div>
+
+            <div className="play-stage">
+              <img className="nyalea" src="/nyalea.png" alt="" />
+              <button
+                className="play-art play-left"
+                onClick={findMatch}
+                disabled={!connected}
+                title={connected ? "Find a match" : "Connecting…"}
+                aria-label="Find a match"
+              >
+                <img src="/playbutton.png" alt="Play" />
+              </button>
+              <button
+                className="play-art play-right"
+                onClick={createInvite}
+                disabled={!connected}
+                title="Invite friends"
+                aria-label="Invite friends"
+              >
+                <img src="/invitefriend.png" alt="Invite friends" />
+              </button>
+            </div>
           </div>
         )}
 
