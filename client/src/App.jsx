@@ -13,6 +13,10 @@ const PHASE = {
   RESULT: "result",
 };
 
+// How long Mimiko shows the "wait" pose (after a match is found) before the
+// match screen takes over — long enough to actually register.
+const FOUND_HOLD_MS = 1200;
+
 const LS_TOKEN = "aoe.token";
 const LS_VOL = "aoe.volume";
 // WebRTC ICE servers. STUN alone fails across most real-world NATs, so a
@@ -95,10 +99,11 @@ export default function App() {
   const [audioFailed, setAudioFailed] = useState(false);
   // Brief curtain-reveal animation when a match is found.
   const [matchStarting, setMatchStarting] = useState(false);
-  // Queue screen: mimiko → mimikosleep after 5s; mimikowait flashes on found.
+  // Queue screen (one page, image swaps): mimiko → mimikosleep after 5s →
+  // mimikowait when matched (held a beat so it registers, then the match).
   const [queueSleep, setQueueSleep] = useState(false);
-  const [foundFlash, setFoundFlash] = useState(false);
-  const foundFlashTimer = useRef(null);
+  const [queueFound, setQueueFound] = useState(false);
+  const foundHoldRef = useRef(false);
   const [countdown, setCountdown] = useState(0);
   const [remaining, setRemaining] = useState(1);
   const [feedback, setFeedback] = useState(null);
@@ -203,6 +208,8 @@ export default function App() {
       setNotice(null);
       setResult(null);
       setOppGone(false);
+      setQueueFound(false);
+      foundHoldRef.current = false;
     });
     socket.on("queueCancelled", () => setPhase(PHASE.LOBBY));
 
@@ -219,13 +226,17 @@ export default function App() {
       setHasRemote(false);
       setPeerAV({ cam: false, mic: false });
       ensurePeer(); // ready to negotiate if either side enables A/V
-      setFoundFlash(true); // split-second mimikowait before the match shows
-      clearTimeout(foundFlashTimer.current);
-      foundFlashTimer.current = setTimeout(() => setFoundFlash(false), 800);
-      setMatchStarting(true); // curtain-reveal into the match
+      // Stay on the SAME queue page; Mimiko just switches to the "wait" pose
+      // and holds a beat (so it registers) before the match screen comes up.
+      setQueueFound(true);
+      foundHoldRef.current = true;
       clearTimeout(matchStartTimer.current);
-      matchStartTimer.current = setTimeout(() => setMatchStarting(false), 1100);
-      setPhase(PHASE.PREPARE);
+      matchStartTimer.current = setTimeout(() => {
+        foundHoldRef.current = false;
+        setMatchStarting(true); // curtain-reveal into the match
+        setPhase(PHASE.PREPARE);
+        setTimeout(() => setMatchStarting(false), 1100);
+      }, FOUND_HOLD_MS);
     });
 
     socket.on("round:prepare", ({ round, videoUrl, audioUrl, dub }) => {
@@ -247,7 +258,9 @@ export default function App() {
         dub: dub || null,
         durationMs: null,
       });
-      setPhase(PHASE.PREPARE);
+      // While Mimiko is holding the "wait" pose, stay on the queue page;
+      // the found-hold timer flips to PREPARE when it's done.
+      if (!foundHoldRef.current) setPhase(PHASE.PREPARE);
     });
 
     socket.on("round:start", ({ countdownMs, durationMs }) => {
@@ -1023,11 +1036,6 @@ export default function App() {
         </div>
       )}
 
-      {foundFlash && (
-        <div className="found-flash">
-          <img src="/mimikowait.png" alt="" />
-        </div>
-      )}
 
       {panel === "profile" && (
         <div className="modal-backdrop" onClick={closePanel}>
@@ -1298,12 +1306,20 @@ export default function App() {
           <div className="queue-screen">
             <img
               className="queue-mimiko"
-              src={queueSleep ? "/mimikosleep.png" : "/mimiko.png"}
+              src={
+                queueFound
+                  ? "/mimikowait.png"
+                  : queueSleep
+                  ? "/mimikosleep.png"
+                  : "/mimiko.png"
+              }
               alt=""
             />
-            <button className="queue-cancel" onClick={cancelQueue}>
-              Cancel
-            </button>
+            {!queueFound && (
+              <button className="queue-cancel" onClick={cancelQueue}>
+                Cancel
+              </button>
+            )}
           </div>
         )}
 

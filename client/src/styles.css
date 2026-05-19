@@ -1170,31 +1170,30 @@ button.danger:hover:not(:disabled) {
 .lobby { text-align: center; padding: 8px 0 4px; }
 .lobby-ava-ro { cursor: default; }
 
-/* Nyalea up top; Play + Invite straight (no tilt), equal HEIGHT so they pair
-   naturally, flush against each other, snug right under her. Their combined
-   width sits a touch past her width. (PNGs are trimmed to the artwork, so
-   "touching" is truly edge-to-edge with no transparent padding.) */
+/* Vertical stack: nyalea, then a big Play (wider than her box), then a
+   slightly-narrower Invite under Play. All sized in vh so the whole lobby
+   fits above the leaderboard without scrolling. (PNGs trimmed to artwork.) */
 .play-stage {
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin: 8px auto 0;
+  margin: 4px auto 0;
 }
 .play-stage .nyalea {
   display: block;
-  width: clamp(220px, 30vh, 330px);
-  height: auto;
+  height: clamp(150px, 21vh, 250px); /* nyalea AR ~0.63 → width ≈ 0.63·h */
+  width: auto;
   user-select: none;
   -webkit-user-drag: none;
-  filter: drop-shadow(0 0 34px rgba(139, 92, 246, 0.38))
-    drop-shadow(0 16px 26px rgba(0, 0, 0, 0.45));
+  filter: drop-shadow(0 0 32px rgba(139, 92, 246, 0.36))
+    drop-shadow(0 14px 22px rgba(0, 0, 0, 0.45));
 }
 .play-actions {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
   gap: 0;
-  margin-top: -4px; /* flush under her */
+  margin-top: -2px; /* snug under her */
 }
 .play-art {
   flex: none;
@@ -1205,20 +1204,27 @@ button.danger:hover:not(:disabled) {
   border: none;
   cursor: pointer;
   transition: transform 0.14s ease, filter 0.14s ease;
-  filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.45));
+  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.45));
 }
-/* Equal height → matched pair; each keeps its own natural width. Combined
-   width ≈ 8.1vh × (play AR 2.23 + invite AR 1.71) ≈ slightly > nyalea. */
 .play-art img {
   display: block;
-  height: clamp(56px, 8.1vh, 88px);
-  width: auto;
+  height: auto;
+}
+/* Play: wider than nyalea's box. Invite: under Play, a bit less wide. */
+.play-actions .play-art:first-child img {
+  width: clamp(230px, 31vh, 360px);
+}
+.play-actions .play-art:last-child {
+  margin-top: -2px;
+}
+.play-actions .play-art:last-child img {
+  width: clamp(185px, 25vh, 290px);
 }
 .play-art:hover:not(:disabled) {
-  transform: scale(1.07);
+  transform: scale(1.05);
   z-index: 1;
   filter: drop-shadow(0 0 24px color-mix(in srgb, var(--accent) 60%, transparent))
-    drop-shadow(0 12px 20px rgba(0, 0, 0, 0.5));
+    drop-shadow(0 10px 18px rgba(0, 0, 0, 0.5));
 }
 .play-art:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -1254,32 +1260,4 @@ button.danger:hover:not(:disabled) {
   background: rgba(242, 84, 91, 0.85);
   color: #fff;
   border-color: transparent;
-}
-
-/* Split-second "found" splash: normal-sized image on a dim backdrop. */
-.found-flash {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  background: rgba(8, 7, 12, 0.82);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  animation: foundPop 0.8s ease both;
-}
-.found-flash img {
-  max-width: min(70vw, 400px);
-  max-height: 68vh;
-  width: auto;
-  height: auto;
-  object-fit: contain;
-  user-select: none;
-  -webkit-user-drag: none;
-}
-@keyframes foundPop {
-  0% { opacity: 0; }
-  16% { opacity: 1; }
-  82% { opacity: 1; }
-  100% { opacity: 0; }
 }
