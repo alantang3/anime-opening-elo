@@ -1231,8 +1231,8 @@ button.danger:hover:not(:disabled) {
    stacked; only the active one is opaque → true cross-fade, no remount. */
 .queue-figure {
   position: relative;
-  width: clamp(300px, 52vh, 470px);
-  aspect-ratio: 1380 / 900;
+  width: clamp(320px, 58vh, 520px);
+  aspect-ratio: 1920 / 1320;
   margin: 0 auto;
 }
 .queue-figure .qm {
@@ -1250,20 +1250,24 @@ button.danger:hover:not(:disabled) {
 }
 .queue-figure .qm.on { opacity: 1; }
 .queue-cancel {
-  margin: 18px auto 0;
+  display: block;
+  margin: 14px auto 0;
   flex: none;
   width: auto;
-  padding: 9px 22px;
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 700;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: transform 0.14s ease, filter 0.14s ease;
+  filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.4));
+}
+.queue-cancel img {
+  display: block;
+  width: clamp(110px, 13vh, 150px);
+  height: auto;
 }
 .queue-cancel:hover:not(:disabled) {
-  filter: none;
-  background: rgba(242, 84, 91, 0.85);
-  color: #fff;
-  border-color: transparent;
+  filter: drop-shadow(0 0 16px color-mix(in srgb, var(--danger) 55%, transparent))
+    drop-shadow(0 8px 14px rgba(0, 0, 0, 0.5));
+  transform: scale(1.06);
 }

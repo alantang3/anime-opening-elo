@@ -1322,8 +1322,12 @@ export default function App() {
               />
             </div>
             {!queueFound && (
-              <button className="queue-cancel" onClick={cancelQueue}>
-                Cancel
+              <button
+                className="queue-cancel"
+                onClick={cancelQueue}
+                aria-label="Cancel"
+              >
+                <img src="/cancelbutton.png" alt="Cancel" />
               </button>
             )}
           </div>
