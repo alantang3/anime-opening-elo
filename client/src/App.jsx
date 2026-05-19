@@ -1322,7 +1322,7 @@ export default function App() {
               />
               {queueFound && (
                 <span className="kitsune-elo">
-                  {opponent?.elo ?? "?"} ELO opponent found
+                  {opponent?.elo ?? "?"} ELO opponent found.
                 </span>
               )}
             </div>

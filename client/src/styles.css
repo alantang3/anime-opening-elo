@@ -1249,26 +1249,23 @@ button.danger:hover:not(:disabled) {
     drop-shadow(0 12px 20px rgba(0, 0, 0, 0.4));
 }
 .queue-figure .qm.on { opacity: 1; }
-/* Live opponent Elo, laid over kitsune's baked "ELO opponent found." bar
-   (the box sits at a fixed spot in the shared canvas, so % is exact). */
+/* Live opponent Elo as TEXT ONLY, sitting on kitsune's now-blank drawn bar
+   (its baked text was painted out with the bar's exact colour). Matched to
+   the original: Nunito SemiBold, warm dark-brown, centred on the bar. */
 .kitsune-elo {
   position: absolute;
   left: 50%;
-  transform: translateX(-50%);
-  top: 70.6%;
-  width: 31%;
-  height: 12.4%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #fdeef1;
-  border: 1px solid #f1c6d3;
-  border-radius: 999px;
-  color: #9a5a73;
-  font-weight: 700;
-  font-size: clamp(9px, 1.7vh, 15px);
+  top: 76.4%;
+  transform: translate(-50%, -50%);
+  width: 30%;
+  text-align: center;
+  font-family: "Nunito", "Inter", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+  font-weight: 600;
+  font-size: clamp(11px, 1.95vh, 19px);
+  letter-spacing: -0.2px;
+  color: #2c1c13;
   white-space: nowrap;
-  letter-spacing: 0.01em;
 }
 .queue-cancel {
   display: block;
