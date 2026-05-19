@@ -98,6 +98,10 @@ export default function App() {
   const [audioFailed, setAudioFailed] = useState(false);
   // Brief curtain-reveal animation when a match is found.
   const [matchStarting, setMatchStarting] = useState(false);
+  // Queue screen: mimiko → mimikosleep after 5s; mimikowait flashes on found.
+  const [queueSleep, setQueueSleep] = useState(false);
+  const [foundFlash, setFoundFlash] = useState(false);
+  const foundFlashTimer = useRef(null);
   const [countdown, setCountdown] = useState(0);
   const [remaining, setRemaining] = useState(1);
   const [feedback, setFeedback] = useState(null);
@@ -218,6 +222,9 @@ export default function App() {
       setHasRemote(false);
       setPeerAV({ cam: false, mic: false });
       ensurePeer(); // ready to negotiate if either side enables A/V
+      setFoundFlash(true); // split-second mimikowait before the match shows
+      clearTimeout(foundFlashTimer.current);
+      foundFlashTimer.current = setTimeout(() => setFoundFlash(false), 800);
       setMatchStarting(true); // curtain-reveal into the match
       clearTimeout(matchStartTimer.current);
       matchStartTimer.current = setTimeout(() => setMatchStarting(false), 1100);
@@ -592,6 +599,14 @@ export default function App() {
   useEffect(() => {
     if (videoRef.current) videoRef.current.volume = volume;
   }, [volume, roundSrc, phase]);
+
+  // Queue: show mimiko; after 5s with no match, switch to mimikosleep.
+  useEffect(() => {
+    setQueueSleep(false);
+    if (phase !== PHASE.QUEUE) return;
+    const t = setTimeout(() => setQueueSleep(true), 5000);
+    return () => clearTimeout(t);
+  }, [phase]);
 
   // Bind A/V streams AFTER the <video> elements mount. They render only when
   // (camOn || micOn || hasRemote) AND not on the RESULT replay, so the
@@ -1026,6 +1041,12 @@ export default function App() {
         </div>
       )}
 
+      {foundFlash && (
+        <div className="found-flash">
+          <img src="/mimikowait.png" alt="" />
+        </div>
+      )}
+
       {panel === "profile" && (
         <div className="modal-backdrop" onClick={closePanel}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1241,24 +1262,26 @@ export default function App() {
 
             <div className="play-stage">
               <img className="nyalea" src="/nyalea.png" alt="" />
-              <button
-                className="play-art play-left"
-                onClick={findMatch}
-                disabled={!connected}
-                title={connected ? "Find a match" : "Connecting…"}
-                aria-label="Find a match"
-              >
-                <img src="/playbutton.png" alt="Play" />
-              </button>
-              <button
-                className="play-art play-right"
-                onClick={createInvite}
-                disabled={!connected}
-                title="Invite friends"
-                aria-label="Invite friends"
-              >
-                <img src="/invitefriend.png" alt="Invite friends" />
-              </button>
+              <div className="play-actions">
+                <button
+                  className="play-art"
+                  onClick={findMatch}
+                  disabled={!connected}
+                  title={connected ? "Find a match" : "Connecting…"}
+                  aria-label="Find a match"
+                >
+                  <img src="/playbutton.png" alt="Play" />
+                </button>
+                <button
+                  className="play-art"
+                  onClick={createInvite}
+                  disabled={!connected}
+                  title="Invite friends"
+                  aria-label="Invite friends"
+                >
+                  <img src="/invitefriend.png" alt="Invite friends" />
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1290,13 +1313,15 @@ export default function App() {
 
         {/* ---------- Queue ---------- */}
         {phase === PHASE.QUEUE && (
-          <div style={{ textAlign: "center", padding: "40px 0" }}>
-            <div className="pulse">Finding an opponent…</div>
-            <div className="button-row" style={{ maxWidth: 220, margin: "20px auto 0" }}>
-              <button className="danger" onClick={cancelQueue}>
-                Cancel
-              </button>
-            </div>
+          <div className="queue-screen">
+            <img
+              className="queue-mimiko"
+              src={queueSleep ? "/mimikosleep.png" : "/mimiko.png"}
+              alt=""
+            />
+            <button className="queue-cancel" onClick={cancelQueue}>
+              Cancel
+            </button>
           </div>
         )}
 

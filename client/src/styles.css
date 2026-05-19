@@ -1209,25 +1209,34 @@ button.danger:hover:not(:disabled) {
 .modal .name-editor { margin: 0; }
 
 /* ---------- Lobby: identity + nyalea play stage ---------- */
-.lobby { text-align: center; padding: 18px 0 4px; }
+.lobby { text-align: center; padding: 8px 0 4px; }
 .lobby-ava-ro { cursor: default; }
 
+/* Nyalea on top (transparent PNG, blends into the card), then the Play /
+   Invite block UNDER her — compact so it all fits without scrolling. */
 .play-stage {
-  position: relative;
-  display: inline-block;
-  margin: 20px auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin: 10px auto 0;
 }
 .play-stage .nyalea {
   display: block;
-  width: clamp(240px, 42vw, 440px);
+  width: clamp(160px, 22vh, 240px);
   height: auto;
   user-select: none;
   -webkit-user-drag: none;
-  filter: drop-shadow(0 26px 44px rgba(0, 0, 0, 0.55));
+  filter: drop-shadow(0 0 30px rgba(139, 92, 246, 0.35))
+    drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45));
+}
+.play-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(8px, 3vw, 28px);
 }
 .play-art {
-  position: absolute;
-  bottom: -4%;
   flex: none;
   width: auto;
   margin: 0;
@@ -1236,24 +1245,80 @@ button.danger:hover:not(:disabled) {
   border: none;
   cursor: pointer;
   transition: transform 0.16s ease, filter 0.16s ease;
-  filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.5));
+  filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.45));
 }
 .play-art img {
   display: block;
-  width: clamp(118px, 21vw, 188px);
+  width: clamp(120px, 17vh, 190px);
   height: auto;
 }
-.play-left { left: -11%; transform: rotate(-3deg); }
-.play-right { right: -11%; transform: rotate(3deg); }
 .play-art:hover:not(:disabled) {
-  filter: drop-shadow(0 0 26px color-mix(in srgb, var(--accent) 60%, transparent))
-    drop-shadow(0 14px 24px rgba(0, 0, 0, 0.55));
+  transform: scale(1.09);
+  filter: drop-shadow(0 0 22px color-mix(in srgb, var(--accent) 60%, transparent))
+    drop-shadow(0 12px 20px rgba(0, 0, 0, 0.5));
 }
-.play-left:hover:not(:disabled) { transform: rotate(-3deg) scale(1.13); }
-.play-right:hover:not(:disabled) { transform: rotate(3deg) scale(1.13); }
 .play-art:disabled { opacity: 0.5; cursor: not-allowed; }
 
-@media (max-width: 560px) {
-  .play-left { left: -6%; }
-  .play-right { right: -6%; }
+/* ---------- Queue screen: full-screen Mimiko ---------- */
+.queue-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.queue-mimiko {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.queue-cancel {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  flex: none;
+  width: auto;
+  padding: 9px 22px;
+  background: rgba(8, 7, 12, 0.6);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  backdrop-filter: blur(4px);
+}
+.queue-cancel:hover:not(:disabled) {
+  filter: none;
+  background: rgba(242, 84, 91, 0.85);
+  border-color: transparent;
+}
+
+/* Split-second "found" flash over everything before the match shows. */
+.found-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: foundPop 0.8s ease both;
+}
+.found-flash img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+@keyframes foundPop {
+  0% { opacity: 0; }
+  16% { opacity: 1; }
+  82% { opacity: 1; }
+  100% { opacity: 0; }
 }
