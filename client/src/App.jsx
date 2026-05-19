@@ -20,7 +20,31 @@ const PHASE = {
 
 const LS_TOKEN = "aoe.token";
 const LS_VOL = "aoe.volume";
-const STUN = [{ urls: "stun:stun.l.google.com:19302" }];
+// WebRTC ICE servers. STUN alone fails across most real-world NATs, so a
+// TURN relay is REQUIRED for camera/mic to work between two different
+// networks (without it both sides only ever see themselves). Ships with the
+// free OpenRelay project so it works out of the box; override with
+// VITE_TURN_URL / VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL (build-time env)
+// for a reliable production relay.
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  {
+    urls: [
+      "turn:openrelay.metered.ca:80",
+      "turn:openrelay.metered.ca:443",
+      "turn:openrelay.metered.ca:443?transport=tcp",
+    ],
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+];
+if (import.meta.env.VITE_TURN_URL) {
+  ICE_SERVERS.push({
+    urls: import.meta.env.VITE_TURN_URL,
+    username: import.meta.env.VITE_TURN_USERNAME || "",
+    credential: import.meta.env.VITE_TURN_CREDENTIAL || "",
+  });
+}
 
 // Anime-flavoured rank tiers across Elo ranges (everyone starts at 100).
 const RANKS = [
@@ -590,7 +614,7 @@ export default function App() {
   // ---------- WebRTC ----------
   function ensurePeer() {
     if (pcRef.current) return pcRef.current;
-    const pc = new RTCPeerConnection({ iceServers: STUN });
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pcRef.current = pc;
     pendingIceRef.current = [];
 
