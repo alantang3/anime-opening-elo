@@ -1170,19 +1170,18 @@ button.danger:hover:not(:disabled) {
 .lobby { text-align: center; padding: 8px 0 4px; }
 .lobby-ava-ro { cursor: default; }
 
-/* Vertical stack: nyalea, then a big Play (wider than her box), then a
-   slightly-narrower Invite under Play. All sized in vh so the whole lobby
-   fits above the leaderboard without scrolling. (PNGs trimmed to artwork.) */
+/* Nyalea on top; Play + Invite side-by-side beneath her, equal height so
+   they're a matched pair, flush together, combined a touch past her width. */
 .play-stage {
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin: 4px auto 0;
+  margin: 6px auto 0;
 }
 .play-stage .nyalea {
   display: block;
-  height: clamp(150px, 21vh, 250px); /* nyalea AR ~0.63 → width ≈ 0.63·h */
-  width: auto;
+  width: clamp(220px, 30vh, 330px);
+  height: auto;
   user-select: none;
   -webkit-user-drag: none;
   filter: drop-shadow(0 0 32px rgba(139, 92, 246, 0.36))
@@ -1190,10 +1189,10 @@ button.danger:hover:not(:disabled) {
 }
 .play-actions {
   display: flex;
-  flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 0;
-  margin-top: -2px; /* snug under her */
+  margin-top: -4px; /* snug under her */
 }
 .play-art {
   flex: none;
@@ -1204,27 +1203,19 @@ button.danger:hover:not(:disabled) {
   border: none;
   cursor: pointer;
   transition: transform 0.14s ease, filter 0.14s ease;
-  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.45));
+  filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.45));
 }
+/* Equal height → matched pair; each keeps its own natural width. */
 .play-art img {
   display: block;
-  height: auto;
-}
-/* Play: wider than nyalea's box. Invite: under Play, a bit less wide. */
-.play-actions .play-art:first-child img {
-  width: clamp(230px, 31vh, 360px);
-}
-.play-actions .play-art:last-child {
-  margin-top: -2px;
-}
-.play-actions .play-art:last-child img {
-  width: clamp(185px, 25vh, 290px);
+  height: clamp(56px, 8.1vh, 92px);
+  width: auto;
 }
 .play-art:hover:not(:disabled) {
-  transform: scale(1.05);
+  transform: scale(1.07);
   z-index: 1;
   filter: drop-shadow(0 0 24px color-mix(in srgb, var(--accent) 60%, transparent))
-    drop-shadow(0 10px 18px rgba(0, 0, 0, 0.5));
+    drop-shadow(0 12px 20px rgba(0, 0, 0, 0.5));
 }
 .play-art:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -1242,6 +1233,12 @@ button.danger:hover:not(:disabled) {
   -webkit-user-drag: none;
   filter: drop-shadow(0 0 30px rgba(139, 92, 246, 0.32))
     drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45));
+  /* Soft fade on each pose change (mimiko → sleep → wait) — no hard cut. */
+  animation: mimikoFade 0.35s ease;
+}
+@keyframes mimikoFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 .queue-cancel {
   margin: 18px auto 0;

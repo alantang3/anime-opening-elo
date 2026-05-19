@@ -1304,17 +1304,21 @@ export default function App() {
         {/* ---------- Queue ---------- */}
         {phase === PHASE.QUEUE && (
           <div className="queue-screen">
-            <img
-              className="queue-mimiko"
-              src={
-                queueFound
-                  ? "/mimikowait.png"
-                  : queueSleep
-                  ? "/mimikosleep.png"
-                  : "/mimiko.png"
-              }
-              alt=""
-            />
+            {(() => {
+              const src = queueFound
+                ? "/mimikowait.png"
+                : queueSleep
+                ? "/mimikosleep.png"
+                : "/mimiko.png";
+              return (
+                <img
+                  className="queue-mimiko"
+                  key={src}
+                  src={src}
+                  alt=""
+                />
+              );
+            })()}
             {!queueFound && (
               <button className="queue-cancel" onClick={cancelQueue}>
                 Cancel
