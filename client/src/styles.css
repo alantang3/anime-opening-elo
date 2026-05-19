@@ -1231,8 +1231,8 @@ button.danger:hover:not(:disabled) {
    stacked; only the active one is opaque → true cross-fade, no remount. */
 .queue-figure {
   position: relative;
-  width: clamp(240px, 42vh, 380px);
-  aspect-ratio: 1040 / 900;
+  width: clamp(300px, 52vh, 470px);
+  aspect-ratio: 1380 / 900;
   margin: 0 auto;
 }
 .queue-figure .qm {
