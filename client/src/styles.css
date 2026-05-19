@@ -1224,21 +1224,57 @@ button.danger:hover:not(:disabled) {
   text-align: center;
   padding: 6px 0 24px;
 }
-.queue-mimiko {
-  display: block;
-  width: clamp(220px, 38vh, 360px);
-  height: auto;
+/* All three poses are preloaded and stacked; only the active one is opaque,
+   so the swap is a true cross-fade — no remount/flash. */
+.queue-figure {
+  position: relative;
+  width: clamp(230px, 40vh, 360px);
+  height: clamp(200px, 34vh, 320px);
   margin: 0 auto;
+}
+/* All poses preloaded & stacked, bottom-anchored so her feet line up across
+   poses (bubbles extend into the empty space above); only the active one is
+   opaque → true cross-fade, no remount/flash. */
+.queue-figure .qm {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+  opacity: 0;
+  transition: opacity 0.45s ease;
   user-select: none;
   -webkit-user-drag: none;
-  filter: drop-shadow(0 0 30px rgba(139, 92, 246, 0.32))
-    drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45));
-  /* Soft fade on each pose change (mimiko → sleep → wait) — no hard cut. */
-  animation: mimikoFade 0.35s ease;
+  filter: drop-shadow(0 0 26px rgba(139, 92, 246, 0.3))
+    drop-shadow(0 12px 20px rgba(0, 0, 0, 0.4));
 }
-@keyframes mimikoFade {
-  from { opacity: 0; }
-  to { opacity: 1; }
+.queue-figure .qm.on { opacity: 1; }
+
+/* One consistent box (CSS, our control — identical in every pose). */
+.queue-pill {
+  display: inline-block;
+  margin: 10px auto 0;
+  padding: 6px 32px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #f7abc8, #ef90b5);
+  color: #fff;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  font-size: 15px;
+  box-shadow: 0 6px 16px -6px rgba(239, 144, 181, 0.7);
+}
+.queue-status {
+  display: block;
+  width: max-content;
+  max-width: 80%;
+  margin: 8px auto 0;
+  padding: 7px 24px;
+  border-radius: 999px;
+  background: #fdeef3;
+  color: #9a5a73;
+  font-weight: 600;
+  font-size: 13px;
 }
 .queue-cancel {
   margin: 18px auto 0;

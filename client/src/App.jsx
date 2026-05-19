@@ -1304,21 +1304,27 @@ export default function App() {
         {/* ---------- Queue ---------- */}
         {phase === PHASE.QUEUE && (
           <div className="queue-screen">
-            {(() => {
-              const src = queueFound
-                ? "/mimikowait.png"
-                : queueSleep
-                ? "/mimikosleep.png"
-                : "/mimiko.png";
-              return (
-                <img
-                  className="queue-mimiko"
-                  key={src}
-                  src={src}
-                  alt=""
-                />
-              );
-            })()}
+            <div className="queue-figure">
+              <img
+                className={"qm" + (!queueSleep && !queueFound ? " on" : "")}
+                src="/mimiko.png"
+                alt=""
+              />
+              <img
+                className={"qm" + (queueSleep && !queueFound ? " on" : "")}
+                src="/mimikosleep.png"
+                alt=""
+              />
+              <img
+                className={"qm" + (queueFound ? " on" : "")}
+                src="/mimikowait.png"
+                alt=""
+              />
+            </div>
+            <div className="queue-pill">MIMIKO</div>
+            <div className="queue-status">
+              {queueFound ? "Match found!" : "Finding players…"}
+            </div>
             {!queueFound && (
               <button className="queue-cancel" onClick={cancelQueue}>
                 Cancel
