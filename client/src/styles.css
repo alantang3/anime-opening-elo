@@ -1226,22 +1226,21 @@ button.danger:hover:not(:disabled) {
 }
 /* All three poses are preloaded and stacked; only the active one is opaque,
    so the swap is a true cross-fade — no remount/flash. */
+/* Each pose is now a fixed 1040×900 composite with the SAME box baked in at
+   an identical position, so they're pixel-consistent. All three preloaded &
+   stacked; only the active one is opaque → true cross-fade, no remount. */
 .queue-figure {
   position: relative;
-  width: clamp(230px, 40vh, 360px);
-  height: clamp(200px, 34vh, 320px);
+  width: clamp(240px, 42vh, 380px);
+  aspect-ratio: 1040 / 900;
   margin: 0 auto;
 }
-/* All poses preloaded & stacked, bottom-anchored so her feet line up across
-   poses (bubbles extend into the empty space above); only the active one is
-   opaque → true cross-fade, no remount/flash. */
 .queue-figure .qm {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   object-fit: contain;
-  object-position: center bottom;
   opacity: 0;
   transition: opacity 0.45s ease;
   user-select: none;
@@ -1250,32 +1249,6 @@ button.danger:hover:not(:disabled) {
     drop-shadow(0 12px 20px rgba(0, 0, 0, 0.4));
 }
 .queue-figure .qm.on { opacity: 1; }
-
-/* One consistent box (CSS, our control — identical in every pose). */
-.queue-pill {
-  display: inline-block;
-  margin: 10px auto 0;
-  padding: 6px 32px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #f7abc8, #ef90b5);
-  color: #fff;
-  font-weight: 800;
-  letter-spacing: 0.16em;
-  font-size: 15px;
-  box-shadow: 0 6px 16px -6px rgba(239, 144, 181, 0.7);
-}
-.queue-status {
-  display: block;
-  width: max-content;
-  max-width: 80%;
-  margin: 8px auto 0;
-  padding: 7px 24px;
-  border-radius: 999px;
-  background: #fdeef3;
-  color: #9a5a73;
-  font-weight: 600;
-  font-size: 13px;
-}
 .queue-cancel {
   margin: 18px auto 0;
   flex: none;

@@ -1321,10 +1321,6 @@ export default function App() {
                 alt=""
               />
             </div>
-            <div className="queue-pill">MIMIKO</div>
-            <div className="queue-status">
-              {queueFound ? "Match found!" : "Finding players…"}
-            </div>
             {!queueFound && (
               <button className="queue-cancel" onClick={cancelQueue}>
                 Cancel
