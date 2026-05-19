@@ -50,14 +50,17 @@ export function resolveWin(winnerElo, loserElo, popFactor) {
   const expWin = expectedScore(winnerElo, loserElo);
   const delta = k * (1 - expWin);
 
-  const winnerAfter = winnerElo + delta;
-  const loserAfter = floor(loserElo - delta * LOSS_MULT);
+  // Whole-number ratings: round the resulting Elo, then derive the deltas
+  // from the rounded values so what's shown ("+27") always equals the actual
+  // change in the displayed rating.
+  const winnerAfter = Math.round(winnerElo + delta);
+  const loserAfter = Math.round(floor(loserElo - delta * LOSS_MULT));
 
   return {
     kEff: round1(k),
     expectedWinner: Math.round(expWin * 100), // %
-    winnerDelta: round1(winnerAfter - winnerElo),
-    loserDelta: round1(loserAfter - loserElo),
+    winnerDelta: Math.round(winnerAfter - winnerElo),
+    loserDelta: Math.round(loserAfter - loserElo),
     winnerAfter,
     loserAfter,
   };
@@ -68,11 +71,11 @@ export function resolveWin(winnerElo, loserElo, popFactor) {
  * players take the flat penalty (recorded as a draw each in the DB).
  */
 export function resolveTimeout(aElo, bElo) {
-  const aAfter = floor(aElo - TIMEOUT_PENALTY);
-  const bAfter = floor(bElo - TIMEOUT_PENALTY);
+  const aAfter = Math.round(floor(aElo - TIMEOUT_PENALTY));
+  const bAfter = Math.round(floor(bElo - TIMEOUT_PENALTY));
   return {
-    aDelta: round1(aAfter - aElo),
-    bDelta: round1(bAfter - bElo),
+    aDelta: Math.round(aAfter - aElo),
+    bDelta: Math.round(bAfter - bElo),
     aAfter,
     bAfter,
   };

@@ -237,6 +237,12 @@ export default function App() {
         setMe((prev) =>
           prev ? { ...prev, elo: data.result.eloAfter } : prev
         );
+      // Opponent's rating moves on your screen too — including the bot's, so
+      // a rematch shows it gained/lost what it should.
+      if (data?.result?.oppElo != null)
+        setOpponent((prev) =>
+          prev ? { ...prev, elo: data.result.oppElo } : prev
+        );
       // Rank-up reveal: did this result push us into a higher tier?
       const before = data?.result?.eloBefore;
       const after = data?.result?.eloAfter;

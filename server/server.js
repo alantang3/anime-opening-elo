@@ -131,8 +131,32 @@ app.get("/api/search", async (req, res) => {
   }
 });
 
+// Seeded "ghost" players so the board looks lively and gives newcomers
+// something to chase. They never enter matchmaking (no socket) — purely
+// display, merged with real players and sorted by Elo.
+const GHOST_PLAYERS = [
+  { id: "ghost:1", nickname: "KamiSpeed", elo: 4480, wins: 612, losses: 188 },
+  { id: "ghost:2", nickname: "OPSniper", elo: 4210, wins: 540, losses: 201 },
+  { id: "ghost:3", nickname: "SakuraBlitz", elo: 3970, wins: 498, losses: 220 },
+  { id: "ghost:4", nickname: "ZeroFrame", elo: 3760, wins: 451, losses: 209 },
+  { id: "ghost:5", nickname: "TitanEar", elo: 3540, wins: 420, losses: 233 },
+  { id: "ghost:6", nickname: "RamenGod", elo: 3320, wins: 388, losses: 241 },
+  { id: "ghost:7", nickname: "NanoDesu", elo: 3110, wins: 355, losses: 248 },
+  { id: "ghost:8", nickname: "EdTune", elo: 2890, wins: 322, losses: 257 },
+  { id: "ghost:9", nickname: "PlusUltra", elo: 2660, wins: 298, losses: 263 },
+  { id: "ghost:10", nickname: "SenpaiFM", elo: 2410, wins: 261, losses: 270 },
+  { id: "ghost:11", nickname: "GokuVibes", elo: 2180, wins: 233, losses: 271 },
+  { id: "ghost:12", nickname: "MikuMain", elo: 1940, wins: 205, losses: 268 },
+  { id: "ghost:13", nickname: "ChibiRush", elo: 1700, wins: 178, losses: 262 },
+  { id: "ghost:14", nickname: "OtakuPrime", elo: 1480, wins: 151, losses: 250 },
+  { id: "ghost:15", nickname: "LoFiLeaf", elo: 1260, wins: 124, losses: 233 },
+];
+
 app.get("/api/leaderboard", (_req, res) => {
-  res.json({ players: leaderboard(20) });
+  const merged = [...leaderboard(50), ...GHOST_PLAYERS]
+    .sort((a, b) => b.elo - a.elo)
+    .slice(0, 20);
+  res.json({ players: merged });
 });
 
 // Stats + recent matches for the signed-in player.
@@ -471,6 +495,14 @@ function settleWin(match, winnerConn) {
     },
   });
 
+  // A bot has no DB row, so freshSnapshot() reads its in-memory player —
+  // persist its new rating there so it actually gains/loses across rematches
+  // and the opponent badge reflects it (humans persist via applyMatchResult).
+  for (const m of match.members) {
+    if (!m.isBot) continue;
+    m.player.elo = m === winnerConn ? r.winnerAfter : r.loserAfter;
+  }
+
   emitRoundEnd(match, {
     outcome: match.disconnectForfeit ? "disconnect" : "win",
     [winnerConn.socket.id]: {
@@ -478,12 +510,14 @@ function settleWin(match, winnerConn) {
       eloBefore: Math.round(w.eloRaw),
       eloAfter: Math.round(r.winnerAfter),
       delta: r.winnerDelta,
+      oppElo: Math.round(r.loserAfter), // opponent's new rating
     },
     [loserConn.socket.id]: {
       youWon: false,
       eloBefore: Math.round(l.eloRaw),
       eloAfter: Math.round(r.loserAfter),
       delta: r.loserDelta,
+      oppElo: Math.round(r.winnerAfter),
     },
   });
   beginRematch(match);
@@ -508,6 +542,11 @@ function onRoundTimeout(match) {
     b: { id: b.id, eloAfter: r.bAfter, wins: b.wins, losses: b.losses, draws: b.draws },
   });
 
+  for (const m of match.members) {
+    if (!m.isBot) continue;
+    m.player.elo = m === ca ? r.aAfter : r.bAfter;
+  }
+
   emitRoundEnd(match, {
     outcome: "timeout",
     [ca.socket.id]: {
@@ -515,12 +554,14 @@ function onRoundTimeout(match) {
       eloBefore: Math.round(a.eloRaw),
       eloAfter: Math.round(r.aAfter),
       delta: r.aDelta,
+      oppElo: Math.round(r.bAfter),
     },
     [cb.socket.id]: {
       youWon: false,
       eloBefore: Math.round(b.eloRaw),
       eloAfter: Math.round(r.bAfter),
       delta: r.bDelta,
+      oppElo: Math.round(r.aAfter),
     },
   });
   beginRematch(match);
@@ -650,13 +691,16 @@ function abortUnplayable(match) {
   clearTimers(match);
 
   const perSocket = { outcome: "unplayable" };
+  const snaps = new Map(match.members.map((c) => [c, freshSnapshot(c)]));
   for (const c of match.members) {
-    const s = freshSnapshot(c);
+    const s = snaps.get(c);
+    const other = match.members.find((m) => m !== c);
     perSocket[c.socket.id] = {
       youWon: false,
       eloBefore: Math.round(s.eloRaw),
       eloAfter: Math.round(s.eloRaw), // unchanged
       delta: 0,
+      oppElo: Math.round((snaps.get(other) || s).eloRaw),
     };
   }
   emitRoundEnd(match, perSocket); // reveals the answer; no DB write
