@@ -991,29 +991,39 @@ button.danger:hover:not(:disabled) {
 .side-rail {
   display: none; /* only when there's gutter room (see media query) */
   position: fixed;
-  top: 0;
-  bottom: 0;
-  width: clamp(130px, 15vw, 210px);
-  flex-direction: column;
+  top: 50%;
+  transform: translateY(-50%);
+  flex-direction: row;
   align-items: center;
-  justify-content: space-around;
-  padding: 24px 0;
   pointer-events: none;
-  z-index: 1;
+  /* Behind the opaque .card, so the cluster peeks out of the gutter and the
+     inner overlap is hidden by the panel — looks integrated, not pasted. */
+  z-index: -1;
 }
 .side-left { left: 0; }
 .side-right { right: 0; }
+/* Mirror the whole left cluster so the characters face inward. */
+.side-left { transform: translateY(-50%) scaleX(-1); }
+
 .side-rail img {
-  width: 100%;
+  width: clamp(150px, 15vw, 230px);
   height: auto;
-  max-height: 30vh;
+  max-height: 44vh;
   object-fit: contain;
-  filter: drop-shadow(0 18px 30px rgba(0, 0, 0, 0.6));
-  opacity: 0.92;
+  /* Cut-outs (white keyed to transparent): tie them to the theme with a
+     purple aura + depth shadow and a touch of grade. */
+  filter: drop-shadow(0 0 26px rgba(139, 92, 246, 0.4))
+    drop-shadow(0 16px 26px rgba(0, 0, 0, 0.55)) saturate(1.06)
+    contrast(1.04);
+  opacity: 0.95;
   user-select: none;
   -webkit-user-drag: none;
 }
-.side-left img { transform: scaleX(-1); } /* face inward toward the app */
+/* Overlap them into one smooth fanned cluster: middle one larger & on top. */
+.side-rail img + img { margin-left: -3.4rem; }
+.side-rail img:nth-child(1) { z-index: 1; transform: translateY(16px); }
+.side-rail img:nth-child(2) { z-index: 2; transform: translateY(-8px) scale(1.12); }
+.side-rail img:nth-child(3) { z-index: 1; transform: translateY(16px); }
 @media (min-width: 1300px) {
   .side-rail { display: flex; }
 }
