@@ -51,16 +51,30 @@ const RANKS = [
   { min: 0, name: "Background Character", color: "#8d94a8" },
   { min: 300, name: "Academy Student", color: "#4ec9b0" },
   { min: 600, name: "Rookie Hunter", color: "#38bdf8" },
-  { min: 1000, name: "Chunin", color: "#a78bfa" },
+  { min: 900, name: "Genin", color: "#22d3ee" },
+  { min: 1200, name: "Chunin", color: "#a78bfa" },
   { min: 1500, name: "Jonin", color: "#f472b6" },
-  { min: 2200, name: "S-Class Hero", color: "#fb923c" },
-  { min: 3000, name: "Kage", color: "#f87171" },
-  { min: 4000, name: "Anime God", color: "#fde047" },
+  { min: 1800, name: "Survey Corps Member", color: "#84cc16" },
+  { min: 2100, name: "Pro Hero", color: "#fb923c" },
+  { min: 2400, name: "Hashira", color: "#f43f5e" },
+  { min: 2700, name: "S-Class Hero", color: "#fbbf24" },
+  { min: 3000, name: "Special Grade Sorcerer", color: "#8b5cf6" },
+  { min: 3300, name: "Kage", color: "#ef4444" },
+  { min: 3600, name: "Pirate King", color: "#f59e0b" },
+  { min: 3900, name: "The Honored One", color: "#06b6d4" },
+  { min: 4200, name: "Super Saiyan", color: "#fde047" },
+  { min: 4500, name: "Anime God", color: "#ffffff" },
 ];
 function rankForElo(elo) {
   let r = RANKS[0];
   for (const t of RANKS) if ((elo ?? 0) >= t.min) r = t;
   return r;
+}
+// Leaderboard-position titles, shown IN ADDITION to the Elo rank.
+function leaderboardTitle(index) {
+  if (index === 0) return "Plot Armor Incarnate";
+  if (index >= 1 && index < 10) return "Main Character";
+  return null;
 }
 const initialOf = (n) => (n || "?").trim().charAt(0).toUpperCase();
 
@@ -896,6 +910,8 @@ export default function App() {
   };
 
   const showRails = phase === PHASE.LOBBY || inMatch;
+  const myBoardIndex = me ? board.findIndex((p) => p.id === me.id) : -1;
+  const myTitle = leaderboardTitle(myBoardIndex);
 
   return (
     <div className="app">
@@ -930,7 +946,18 @@ export default function App() {
               </span>
             )}
             <div className="pill-info">
-              <span className="pill-name">{me.nickname}</span>
+              <span className="pill-name">
+                {me.nickname}
+                {myTitle && (
+                  <span
+                    className={
+                      "lb-title" + (myBoardIndex === 0 ? " lb-title-king" : "")
+                    }
+                  >
+                    {myTitle}
+                  </span>
+                )}
+              </span>
               <span
                 className="rank-badge"
                 style={{ color: rankForElo(me.elo).color }}
@@ -1037,6 +1064,16 @@ export default function App() {
               >
                 {rankForElo(me?.elo).name} · {me?.elo} Elo
               </span>
+              {myTitle && (
+                <span
+                  className={
+                    "lb-title lb-title-block" +
+                    (myBoardIndex === 0 ? " lb-title-king" : "")
+                  }
+                >
+                  ★ {myTitle}
+                </span>
+              )}
             </div>
 
             <div className="name-editor">
@@ -1394,16 +1431,28 @@ export default function App() {
       {board.length > 0 && (
         <div className="history">
           <h3>Leaderboard</h3>
-          {board.map((p, i) => (
-            <div className="history-row" key={p.id}>
-              <div className="name">
-                {i + 1}. {p.nickname}
+          {board.map((p, i) => {
+            const title = leaderboardTitle(i);
+            return (
+              <div className="history-row" key={p.id}>
+                <div className="name">
+                  {i + 1}. {p.nickname}
+                  {title && (
+                    <span
+                      className={
+                        "lb-title" + (i === 0 ? " lb-title-king" : "")
+                      }
+                    >
+                      {title}
+                    </span>
+                  )}
+                </div>
+                <div className="meta">
+                  {p.elo} · {p.wins}W/{p.losses}L
+                </div>
               </div>
-              <div className="meta">
-                {p.elo} · {p.wins}W/{p.losses}L
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

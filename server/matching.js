@@ -47,6 +47,7 @@ const MARKER_PATTERNS = [
   /\bpart\s*\d+\b/g,
   /\b\d+(st|nd|rd|th)\s*part\b/g,
   /\bcour\s*\d+\b/g,
+  /\bs\s*\d+\b/g, // terse "S2" / "S 3" season shorthand
   /\bthe movie\b/g,
   /\bmovie\s*\d+\b/g,
   /\bmovies?\b/g,
@@ -84,8 +85,11 @@ export function acronym(normalized) {
   return a.length >= 3 && a.length <= 6 ? a : null;
 }
 
-function addName(set, raw) {
-  const n = normalize(raw);
+// Drop a leading article so "The Rising of the Shield Hero" and "Rising of
+// the Shield Hero" are interchangeable (only the FIRST word).
+const stripArticle = (n) => n.replace(/^(?:the|a|an) /, "").trim();
+
+function addForm(set, n) {
   if (n.length >= 2) set.add(n);
   const b = stripMarkers(n);
   if (b.length >= 2) set.add(b);
@@ -93,6 +97,39 @@ function addName(set, raw) {
   // title ("Attack on Titan Season 3") still yields the franchise acronym
   // "aot", not just "aots3".
   for (const ac of [acronym(n), acronym(b)]) if (ac) set.add(ac);
+}
+
+function addOne(set, raw) {
+  const n = normalize(raw);
+  addForm(set, n);
+  const na = stripArticle(n);
+  if (na !== n && na.length >= 2) addForm(set, na);
+}
+
+// Split a raw title at its first SUBTITLE delimiter — a colon (incl.
+// full-width) or a spaced dash. NOT an in-word hyphen, so "Kaguya-sama"
+// stays whole. Returns [franchiseRoot, subtitle], either possibly "".
+function splitSubtitle(raw) {
+  const s = String(raw || "");
+  const m = s.match(/\s*:\s*|\s*：\s*|\s*[—–]\s*|\s+-\s+/);
+  if (!m) return ["", ""];
+  return [s.slice(0, m.index).trim(), s.slice(m.index + m[0].length).trim()];
+}
+
+function addName(set, raw) {
+  addOne(set, raw);
+  // Players name the FRANCHISE, which is the part before the subtitle:
+  // "Code Geass: Hangyaku no Lelouch" → "code geass"; "Demon Slayer:
+  // Kimetsu no Yaiba Swordsmith Village Arc" → "demon slayer". Strictly
+  // additive — only ever makes more correct, never fewer.
+  const [root, sub] = splitSubtitle(raw);
+  if (root && normalize(root).length >= 3) addOne(set, root);
+  // The subtitle too ("Kaguya-sama: Love Is War" → "love is war"), but only
+  // when it's a real name — season/part/movie markers strip to nothing.
+  if (sub) {
+    const sn = stripMarkers(normalize(sub));
+    if (sn.length >= 3 && /\p{L}/u.test(sn)) addOne(set, sub);
+  }
 }
 
 /**
@@ -130,6 +167,13 @@ export function isCorrect(guessText, acceptedArray) {
   const g = normalize(guessText);
   // Also try the de-spaced form so separator-style acronyms ("A.o.T",
   // "S n K") collapse onto the stored acronym ("aot", "snk").
-  const forms = [g, stripMarkers(g), g.replace(/ /g, "")];
+  const ga = stripArticle(g);
+  const forms = [
+    g,
+    stripMarkers(g),
+    g.replace(/ /g, ""),
+    ga,
+    stripMarkers(ga),
+  ];
   return forms.some((f) => f && f.length >= 2 && set.has(f));
 }
