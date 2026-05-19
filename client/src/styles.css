@@ -1170,8 +1170,10 @@ button.danger:hover:not(:disabled) {
 .lobby { text-align: center; padding: 8px 0 4px; }
 .lobby-ava-ro { cursor: default; }
 
-/* Nyalea up top, the Play / Invite buttons tucked close beneath her and
-   tilted toward each other. */
+/* Nyalea up top; Play + Invite straight (no tilt), equal HEIGHT so they pair
+   naturally, flush against each other, snug right under her. Their combined
+   width sits a touch past her width. (PNGs are trimmed to the artwork, so
+   "touching" is truly edge-to-edge with no transparent padding.) */
 .play-stage {
   display: flex;
   flex-direction: column;
@@ -1180,7 +1182,7 @@ button.danger:hover:not(:disabled) {
 }
 .play-stage .nyalea {
   display: block;
-  width: clamp(240px, 40vh, 400px);
+  width: clamp(220px, 30vh, 330px);
   height: auto;
   user-select: none;
   -webkit-user-drag: none;
@@ -1189,10 +1191,10 @@ button.danger:hover:not(:disabled) {
 }
 .play-actions {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   gap: 0;
-  margin-top: -10px; /* tuck right under her */
+  margin-top: -4px; /* flush under her */
 }
 .play-art {
   flex: none;
@@ -1202,33 +1204,21 @@ button.danger:hover:not(:disabled) {
   background: none;
   border: none;
   cursor: pointer;
-  transition: transform 0.16s ease, filter 0.16s ease;
+  transition: transform 0.14s ease, filter 0.14s ease;
   filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.45));
 }
+/* Equal height → matched pair; each keeps its own natural width. Combined
+   width ≈ 8.1vh × (play AR 2.23 + invite AR 1.71) ≈ slightly > nyalea. */
 .play-art img {
   display: block;
-  width: clamp(180px, 27vh, 290px);
-  height: auto;
-}
-.play-actions .play-art:first-child {
-  transform: rotate(-9deg);
-  margin-right: -14px;
-}
-.play-actions .play-art:last-child {
-  transform: rotate(9deg);
-  margin-left: -14px;
+  height: clamp(56px, 8.1vh, 88px);
+  width: auto;
 }
 .play-art:hover:not(:disabled) {
+  transform: scale(1.07);
+  z-index: 1;
   filter: drop-shadow(0 0 24px color-mix(in srgb, var(--accent) 60%, transparent))
     drop-shadow(0 12px 20px rgba(0, 0, 0, 0.5));
-}
-.play-actions .play-art:first-child:hover:not(:disabled) {
-  transform: rotate(-9deg) scale(1.08);
-  z-index: 1;
-}
-.play-actions .play-art:last-child:hover:not(:disabled) {
-  transform: rotate(9deg) scale(1.08);
-  z-index: 1;
 }
 .play-art:disabled { opacity: 0.5; cursor: not-allowed; }
 
