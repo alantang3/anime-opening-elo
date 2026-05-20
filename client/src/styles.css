@@ -791,13 +791,17 @@ button.danger:hover:not(:disabled) {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- Match stage: YOU | square | OPPONENT, with curtain reveal --- */
+/* ---------- Match stage: YOU | square | OPPONENT, with curtain reveal ---
+   Pushed down from the page top so Midori has room to sit above without
+   colliding with the AniTune header. The clamp scales with viewport
+   height so short laptops don't waste screen real estate. */
 .match-stage {
   position: relative;
   display: flex;
   align-items: stretch;
   justify-content: center;
   gap: 12px;
+  margin-top: clamp(28px, 9vh, 110px);
   margin-bottom: 12px;
   overflow: hidden;
   border-radius: 16px;
@@ -1295,6 +1299,45 @@ button.danger:hover:not(:disabled) {
   aspect-ratio: 1920 / 1320;
   margin: 0 auto;
 }
+
+/* Hina sits on the invite-friend page between the "Waiting for your
+   friend…" pulse and the "Send them this link" hint. Sized similarly to
+   Mimiko's queue figure but proportioned for Hina's own (tightly trimmed)
+   aspect — her sprite is portrait, not the full 1920x1320 canvas.
+   The wrap is the bubble's positioning anchor; Hina herself stays centered
+   so the bubble overlay doesn't drag her around. */
+.invite-hina-wrap {
+  position: relative;
+  display: block;
+  margin: 20px auto 8px;
+  width: clamp(220px, 42vh, 360px);
+}
+.invite-hina {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 0 22px rgba(245, 158, 11, 0.22))
+    drop-shadow(0 10px 18px rgba(0, 0, 0, 0.35));
+}
+/* "Ghosted?" bubble pinned to Hina's upper-right (over her phone hand).
+   width % of the wrap so it never escapes the column. */
+.invite-hina-bubble {
+  position: absolute;
+  top: -4%;
+  right: -14%;
+  width: 56%;
+  height: auto;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.38));
+}
+@media (max-width: 720px) {
+  .invite-hina-bubble { right: -8%; top: -2%; width: 52%; }
+}
 .queue-figure .qm {
   position: absolute;
   inset: 0;
@@ -1329,6 +1372,33 @@ button.danger:hover:not(:disabled) {
   will-change: transform;
 }
 .found-overlay.lift { transform: translateY(-100%); }
+
+/* Midori as the "30 seconds in, lock in" mascot at the top of the battle
+   screen — fades in once and stays until round end. Sits in the gap that
+   .match-stage's margin-top opens up between the header and the battle
+   stage. Negative margin-bottom lets her bottom overlap the stage line
+   slightly so she feels seated on top of the stage. */
+.battle-midori {
+  display: flex;
+  justify-content: center;
+  margin: 0 0 -12px;
+  pointer-events: none;
+  animation: midoriFadeIn 0.6s ease-out both;
+}
+.battle-midori img {
+  display: block;
+  width: clamp(160px, 30vh, 260px);
+  height: auto;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.32))
+    drop-shadow(0 0 22px rgba(74, 222, 128, 0.18));
+}
+@keyframes midoriFadeIn {
+  0%   { opacity: 0; transform: translateY(-6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
 
 /* Yui flash on wrong guess — translucent full-screen overlay that fades
    straight back into the game (no lift like Kitsune). Total visible time
@@ -1418,4 +1488,10 @@ button.danger:hover:not(:disabled) {
   filter: drop-shadow(0 0 16px color-mix(in srgb, var(--danger) 55%, transparent))
     drop-shadow(0 8px 14px rgba(0, 0, 0, 0.5));
   transform: scale(1.06);
+}
+/* When a match is found we hide the cancel button but keep its slot so
+   the queue figure (and mimikowait's box) doesn't shift upward. */
+.queue-cancel.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
 }

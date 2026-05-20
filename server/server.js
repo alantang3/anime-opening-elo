@@ -517,6 +517,10 @@ function settleWin(match, winnerConn) {
 
   emitRoundEnd(match, {
     outcome: match.disconnectForfeit ? "disconnect" : "win",
+    // True only when the loser pressed Forfeit; false for a real network
+    // disconnect (also outcome "disconnect" but no voluntary action). Used
+    // client-side to vary post-round mascot art.
+    voluntary: !!match.voluntary,
     [winnerConn.socket.id]: {
       youWon: true,
       eloBefore: Math.round(w.eloRaw),
@@ -592,6 +596,7 @@ function emitRoundEnd(match, perSocket) {
   for (const c of match.members) {
     c.socket.emit("round:end", {
       outcome: perSocket.outcome,
+      voluntary: !!perSocket.voluntary,
       answer,
       popularity: {
         members: pop.members ?? null,
@@ -607,6 +612,7 @@ function emitRoundEnd(match, perSocket) {
 function beginRematch(match) {
   match.state = "rematch";
   match.disconnectForfeit = false;
+  match.voluntary = false;
   match.rematchVotes.clear();
   emitRematchState(match);
   // The bot decides 50/50 after a short, human-like delay (reusing the same
@@ -791,6 +797,7 @@ function voluntaryForfeit(match, leaverConn) {
   const winner = match.members.find((c) => c !== leaverConn);
   if (!winner) return;
   match.disconnectForfeit = true; // result reads "You forfeited" / "…you win"
+  match.voluntary = true;         // distinguishes from real network disconnect
   match.state = "playing";        // shape the window settleWin expects
   settleWin(match, winner);       // applies Elo, emits round:end, beginRematch
 }

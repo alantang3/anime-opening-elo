@@ -137,9 +137,21 @@ export default function App() {
   // null otherwise (Yuzu still appears, just silent).
   const [yuzuBubble, setYuzuBubble] = useState(null);
   const winStreakRef = useRef(0);
+  // Kuro's speech bubble on a loss: "wannatrywinning" if you're on a 3+
+  // loss streak, "backgroundcharacter" if the show you missed had ≥2.5M MAL
+  // members (it was a mainstream show, no excuse), else default "wow".
+  const [kuroBubble, setKuroBubble] = useState(null);
+  const lossStreakRef = useRef(0);
   // Yui flashes on wrong-guess. Translucent overlay, 0.5s, fades out.
   const [yuiVisible, setYuiVisible] = useState(false);
   const yuiTimer = useRef(null);
+  // Midori appears at the top of the battle 30s into playing as a
+  // "lock in" reminder; stays put until the round ends.
+  const [midoriShown, setMidoriShown] = useState(false);
+  const midoriTimer = useRef(null);
+  // Hina gets a "Ghosted?" bubble if the friend invite has been pending
+  // for >= 10s.
+  const [inviteGhosted, setInviteGhosted] = useState(false);
   const [stats, setStats] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false); // header dropdown
   const [panel, setPanel] = useState(null); // null | "profile" | "stats"
@@ -365,6 +377,9 @@ export default function App() {
       setPhase(PHASE.RESULT);
       setVotes({ you: null, opponent: null });
       setOppGone(false);
+      // Tear down Midori as soon as the battle is over.
+      clearTimeout(midoriTimer.current);
+      setMidoriShown(false);
       refreshBoard();
       // Keep the player's own Elo (profile badge / next match) in sync. The
       // leaderboard refetches, but `me` previously only changed on auth or
@@ -393,14 +408,36 @@ export default function App() {
           rankUpTimer.current = setTimeout(() => setRankUp(null), 5000);
         }
       }
-      // Win-streak tracking + Yuzu's speech bubble pick.
+      // Streak tracking + mascot bubble picks.
       const youWon = !!data?.result?.youWon;
-      if (youWon) winStreakRef.current += 1;
-      else winStreakRef.current = 0;
-      // Rank-up takes priority; otherwise show streak bubble at 3+ wins.
+      // What "counts" as Kuro showing (i.e., a decisive loss FOR YOU):
+      // a normal guess loss, or you pressed Forfeit. Not timeout/unplayable
+      // (nobody truly lost) or real disconnect.
+      const decisiveLoss =
+        !youWon &&
+        (data?.outcome === "win" ||
+          (data?.outcome === "disconnect" && data?.voluntary));
+      if (youWon) {
+        winStreakRef.current += 1;
+        lossStreakRef.current = 0;
+      } else if (decisiveLoss) {
+        lossStreakRef.current += 1;
+        winStreakRef.current = 0;
+      } // timeout / unplayable / real disconnect: leave both streaks alone
+
+      // Yuzu (wins): rank-up > winstreak ≥ 3 > silent.
       if (youWon && rankedUp) setYuzuBubble("rankup");
       else if (youWon && winStreakRef.current >= 3) setYuzuBubble("winstreak");
       else setYuzuBubble(null);
+
+      // Kuro (losses): wannatrywinning (3+ loss streak) > backgroundcharacter
+      // (this song had ≥2.5M MAL members, easy miss) > default "wow".
+      const popMembers = data?.popularity?.members ?? 0;
+      if (decisiveLoss) {
+        if (lossStreakRef.current >= 3) setKuroBubble("wannatrywinning");
+        else if (popMembers >= 2_500_000) setKuroBubble("backgroundcharacter");
+        else setKuroBubble("wow");
+      } else setKuroBubble(null);
     });
 
     socket.on("rematch:state", (v) => setVotes(v));
@@ -483,6 +520,17 @@ export default function App() {
     s.defer = true;
     document.head.appendChild(s);
   }, []);
+
+  // Pop Hina's "Ghosted?" bubble after 10s of waiting on a friend invite.
+  // Reset whenever the invite phase ends (cancelled, accepted, etc).
+  useEffect(() => {
+    if (phase !== PHASE.INVITING) {
+      setInviteGhosted(false);
+      return;
+    }
+    const t = setTimeout(() => setInviteGhosted(true), 10_000);
+    return () => clearTimeout(t);
+  }, [phase]);
 
   // Use Google's OAuth token flow so we render OUR OWN themed button instead
   // of Google's white iframe widget.
@@ -628,6 +676,10 @@ export default function App() {
       setRemaining(Math.max(0, frac));
       if (frac <= 0) clearInterval(tickRef.current);
     }, 100);
+    // Midori shows up 30s in and stays until the round ends.
+    setMidoriShown(false);
+    clearTimeout(midoriTimer.current);
+    midoriTimer.current = setTimeout(() => setMidoriShown(true), 30_000);
   }
   function tapToPlay() {
     const v = videoRef.current;
@@ -1341,7 +1393,13 @@ export default function App() {
             </div>
 
             <div className="play-stage">
-              <img className="nyalea" src="/nyalea.png" alt="" />
+              {/* Anime God (Elo ≥ 4800) replaces Nyalea with Mochi — same slot,
+                  same .nyalea class so size/position are 1:1. */}
+              <img
+                className="nyalea"
+                src={(me?.elo ?? 0) >= 4800 ? "/mochi.png" : "/nyalea.png"}
+                alt=""
+              />
               <div className="play-actions">
                 <button
                   className="play-art"
@@ -1370,6 +1428,16 @@ export default function App() {
         {phase === PHASE.INVITING && (
           <div style={{ textAlign: "center", padding: "32px 0" }}>
             <div className="pulse">Waiting for your friend to join…</div>
+            <div className="invite-hina-wrap" aria-hidden="true">
+              <img className="invite-hina" src="/hina.png" alt="" />
+              {inviteGhosted && (
+                <img
+                  className="invite-hina-bubble"
+                  src="/bubble_ghosted.png"
+                  alt=""
+                />
+              )}
+            </div>
             <p style={{ color: "var(--muted)", marginTop: 16 }}>
               Send them this link — first to open it (signed in) battles you.
               Ranked.
@@ -1380,14 +1448,14 @@ export default function App() {
                 {copied ? "Copied!" : "Copy"}
               </button>
             </div>
-            <div
-              className="button-row"
-              style={{ maxWidth: 220, margin: "20px auto 0" }}
+            <button
+              className="queue-cancel"
+              onClick={cancelInvite}
+              aria-label="Cancel"
+              style={{ marginTop: 20 }}
             >
-              <button className="danger" onClick={cancelInvite}>
-                Cancel
-              </button>
-            </div>
+              <img src="/cancelbutton.png" alt="Cancel" />
+            </button>
           </div>
         )}
 
@@ -1411,21 +1479,32 @@ export default function App() {
                 alt=""
               />
             </div>
-            {!queueFound && (
-              <button
-                className="queue-cancel"
-                onClick={cancelQueue}
-                aria-label="Cancel"
-              >
-                <img src="/cancelbutton.png" alt="Cancel" />
-              </button>
-            )}
+            {/* Cancel sits below the queue figure. We always render it so the
+                queue-screen's overall vertical layout doesn't collapse when
+                a match is found — that's what was nudging mimikowait's box
+                upward vs. mimiko / mimikosleep during the cross-fade. When
+                queueFound we hide it (visibility:hidden + no pointer events)
+                but its slot stays reserved. */}
+            <button
+              className={"queue-cancel" + (queueFound ? " is-hidden" : "")}
+              onClick={cancelQueue}
+              aria-label="Cancel"
+              aria-hidden={queueFound ? "true" : undefined}
+              tabIndex={queueFound ? -1 : 0}
+            >
+              <img src="/cancelbutton.png" alt="Cancel" />
+            </button>
           </div>
         )}
 
         {/* ---------- Match ---------- */}
         {inMatch && (
           <>
+            {midoriShown && phase === PHASE.PLAYING && (
+              <div className="battle-midori" aria-hidden="true">
+                <img src="/midori.png" alt="" />
+              </div>
+            )}
             <div
               className={"match-stage" + (matchStarting ? " is-opening" : "")}
             >
@@ -1622,6 +1701,7 @@ export default function App() {
                 oppGone={oppGone}
                 onRequeue={findMatch}
                 yuzuBubble={yuzuBubble}
+                kuroBubble={kuroBubble}
               />
             )}
           </>
@@ -1676,7 +1756,7 @@ export default function App() {
   );
 }
 
-function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzuBubble }) {
+function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzuBubble, kuroBubble }) {
   const r = result.result || {};
   const won = r.youWon;
   const cls =
@@ -1730,7 +1810,13 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
             </span>
           </div>
         </div>
-        {won && (
+        {/* Yuzu cheers on wins; Kuro pouts in her exact slot on a decisive
+            loss — a normal guess loss, or you pressed Forfeit. NOT shown on
+            real network disconnects (the wire payload's `voluntary` flag
+            differentiates the two cases since the server uses the same
+            "disconnect" outcome label for both). Both share .result-yuzu-wrap
+            so the layout is identical. */}
+        {won ? (
           <div className="result-yuzu-wrap" aria-hidden="true">
             <img className="result-yuzu" src="/yuzu.png" alt="" />
             {yuzuBubble && (
@@ -1741,7 +1827,21 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
               />
             )}
           </div>
-        )}
+        ) : (
+            result.outcome === "win" ||
+            (result.outcome === "disconnect" && result.voluntary)
+          ) ? (
+          <div className="result-yuzu-wrap" aria-hidden="true">
+            <img className="result-yuzu" src="/kuro.png" alt="" />
+            {kuroBubble && (
+              <img
+                className="result-yuzu-bubble"
+                src={`/bubble_${kuroBubble}.png`}
+                alt=""
+              />
+            )}
+          </div>
+        ) : null}
       </div>
 
       {oppGone ? (
