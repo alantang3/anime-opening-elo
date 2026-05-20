@@ -243,8 +243,8 @@ export default function App() {
         setTimeout(() => {
           // 3) …then lifts up like a window blind, revealing the battle.
           setFoundOverlay("up");
-          setTimeout(() => setFoundOverlay(null), 650);
-        }, 850);
+          setTimeout(() => setFoundOverlay(null), 500);
+        }, 2000);
       }, FOUND_HOLD_MS);
     });
 
