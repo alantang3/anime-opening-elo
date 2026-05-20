@@ -132,6 +132,14 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [rankUp, setRankUp] = useState(null); // {name,color} on tier-up
   const rankUpTimer = useRef(null);
+  // Yuzu's speech bubble for this round's result panel: "rankup" if the
+  // round bumped you to a new tier, "winstreak" if you've won >= 3 in a row,
+  // null otherwise (Yuzu still appears, just silent).
+  const [yuzuBubble, setYuzuBubble] = useState(null);
+  const winStreakRef = useRef(0);
+  // Yui flashes on wrong-guess. Translucent overlay, 0.5s, fades out.
+  const [yuiVisible, setYuiVisible] = useState(false);
+  const yuiTimer = useRef(null);
   const [stats, setStats] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false); // header dropdown
   const [panel, setPanel] = useState(null); // null | "profile" | "stats"
@@ -339,6 +347,11 @@ export default function App() {
       if (!correct) {
         setFeedback("Not it — keep guessing!");
         setTimeout(() => inputRef.current?.select(), 30);
+        // Yui flashes onto the screen as a translucent overlay for 0.5s,
+        // then fades back into the game (no blinds-up like Kitsune).
+        clearTimeout(yuiTimer.current);
+        setYuiVisible(true);
+        yuiTimer.current = setTimeout(() => setYuiVisible(false), 500);
       }
     });
     socket.on("opponent:guessed", () => {
@@ -369,15 +382,25 @@ export default function App() {
       // Rank-up reveal: did this result push us into a higher tier?
       const before = data?.result?.eloBefore;
       const after = data?.result?.eloAfter;
+      let rankedUp = false;
       if (before != null && after != null) {
         const rb = rankForElo(before);
         const ra = rankForElo(after);
         if (ra.min > rb.min) {
+          rankedUp = true;
           setRankUp(ra);
           clearTimeout(rankUpTimer.current);
           rankUpTimer.current = setTimeout(() => setRankUp(null), 5000);
         }
       }
+      // Win-streak tracking + Yuzu's speech bubble pick.
+      const youWon = !!data?.result?.youWon;
+      if (youWon) winStreakRef.current += 1;
+      else winStreakRef.current = 0;
+      // Rank-up takes priority; otherwise show streak bubble at 3+ wins.
+      if (youWon && rankedUp) setYuzuBubble("rankup");
+      else if (youWon && winStreakRef.current >= 3) setYuzuBubble("winstreak");
+      else setYuzuBubble(null);
     });
 
     socket.on("rematch:state", (v) => setVotes(v));
@@ -1097,6 +1120,12 @@ export default function App() {
         </div>
       )}
 
+      {yuiVisible && (
+        <div className="yui-overlay" aria-hidden="true">
+          <img className="yui-figure" src="/yui.png" alt="" />
+        </div>
+      )}
+
       {panel === "profile" && (
         <div className="modal-backdrop" onClick={closePanel}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1173,6 +1202,7 @@ export default function App() {
               <div className="muted-row">Loading…</div>
             ) : (
               <div className="stats">
+                <img className="stats-aki" src="/aki.png" alt="" aria-hidden="true" />
                 <div className="stat-grid">
                   <div className="stat">
                     <span className="stat-n">{stats.peakElo}</span>
@@ -1591,6 +1621,7 @@ export default function App() {
                 onVote={vote}
                 oppGone={oppGone}
                 onRequeue={findMatch}
+                yuzuBubble={yuzuBubble}
               />
             )}
           </>
@@ -1645,7 +1676,7 @@ export default function App() {
   );
 }
 
-function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue }) {
+function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzuBubble }) {
   const r = result.result || {};
   const won = r.youWon;
   const cls =
@@ -1671,30 +1702,46 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue }) {
           ? "You got it first!"
           : "Opponent got it first"}
       </h3>
-      <div className="answer">
-        {result.answer?.name}
-        {result.answer?.year && (
-          <span className="year"> ({result.answer.year})</span>
-        )}
-      </div>
-      {result.answer?.franchise &&
-        result.answer.franchise !== result.answer.name && (
-          <div style={{ color: "var(--muted)", fontSize: 13 }}>
-            franchise: {result.answer.franchise}
+      <div className="result-body">
+        <div className="result-info">
+          <div className="answer">
+            {result.answer?.name}
+            {result.answer?.year && (
+              <span className="year"> ({result.answer.year})</span>
+            )}
+          </div>
+          {result.answer?.franchise &&
+            result.answer.franchise !== result.answer.name && (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                franchise: {result.answer.franchise}
+              </div>
+            )}
+          {result.answer?.song && (
+            <div style={{ color: "var(--muted)", fontSize: 14 }}>
+              ♪ {result.answer.song}
+            </div>
+          )}
+
+          <div style={{ marginTop: 10 }}>
+            Your Elo: <strong>{r.eloAfter}</strong>{" "}
+            <span className={delta >= 0 ? "delta-pos" : "delta-neg"}>
+              ({delta >= 0 ? "+" : ""}
+              {delta})
+            </span>
+          </div>
+        </div>
+        {won && (
+          <div className="result-yuzu-wrap" aria-hidden="true">
+            <img className="result-yuzu" src="/yuzu.png" alt="" />
+            {yuzuBubble && (
+              <img
+                className="result-yuzu-bubble"
+                src={`/bubble_${yuzuBubble}.png`}
+                alt=""
+              />
+            )}
           </div>
         )}
-      {result.answer?.song && (
-        <div style={{ color: "var(--muted)", fontSize: 14 }}>
-          ♪ {result.answer.song}
-        </div>
-      )}
-
-      <div style={{ marginTop: 10 }}>
-        Your Elo: <strong>{r.eloAfter}</strong>{" "}
-        <span className={delta >= 0 ? "delta-pos" : "delta-neg"}>
-          ({delta >= 0 ? "+" : ""}
-          {delta})
-        </span>
       </div>
 
       {oppGone ? (

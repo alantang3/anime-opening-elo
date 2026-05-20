@@ -15,12 +15,28 @@ import { ELO_FLOOR } from "./db.js";
 export const K_BASE = 100;
 const K_FLOOR_MULT = 0.5; // even popular wins move Elo a lot
 
-// Wins are worth more than losses cost: correctly naming an OP is hard, so a
-// good guess should feel rewarding while a miss shouldn't gut your rating.
-// The loser drops only this fraction of the winner's gain — deliberately
-// NON-zero-sum (net Elo inflates over time, which also keeps the difficulty
-// ramp gentle).
-const LOSS_MULT = 0.5;
+// Wins are worth more than losses cost (non-zero-sum), but the gap is
+// modest — at 0.8 the loser drops most of what the winner gained, so
+// ranking up still takes net positive play and isn't a one-way ratchet.
+const LOSS_MULT = 0.8;
+
+// Even when paired with someone far below you, you should not gain ZERO
+// Elo for a win — the queue is FIFO, you didn't choose the matchup. Floor
+// the winner's pre-rounding delta here so a +800 Elo gap still yields a
+// small but real reward.
+const MIN_WIN_DELTA = 5;
+
+// Same idea on the other side: forfeiting (or losing) against a higher-Elo
+// opponent must still cost you SOMETHING — you can't escape the round
+// scot-free just because the opponent outranks you.
+const MIN_LOSS_DELTA = 2;
+
+// A win by opponent FORFEIT (voluntary leave OR disconnect) is worth this
+// fraction of a guessed win: you didn't actually name the opening, so the
+// reward (and the loser's proportional loss) is scaled down. Applied AFTER
+// the MIN_WIN_DELTA floor so a forfeit-win is strictly ≤ a guessed win at
+// every matchup.
+const FORFEIT_MULT = 0.5;
 
 // Timeout (nobody guessed before the song ended): both players lose a flat,
 // popularity-independent penalty. Kept flat on purpose — scaling it by
@@ -41,20 +57,31 @@ export function effectiveK(popFactor) {
 }
 
 /**
- * Resolve a decided round (someone guessed correctly, or a disconnect forfeit).
- * NON-zero-sum on purpose: the winner gains the full Elo delta, the loser
- * drops only LOSS_MULT of it (then clamped to the Elo floor).
+ * Resolve a decided round (someone guessed correctly, or a forfeit).
+ * NON-zero-sum on purpose: the winner gains the delta, the loser drops
+ * LOSS_MULT of it (then clamped to the Elo floor).
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.forfeit] true if the win came from the opponent
+ *   leaving / disconnecting (not from a correct guess) — scales the delta
+ *   down by FORFEIT_MULT so it's worth less than a real guess win.
  */
-export function resolveWin(winnerElo, loserElo, popFactor) {
+export function resolveWin(winnerElo, loserElo, popFactor, opts = {}) {
+  const { forfeit = false } = opts;
   const k = effectiveK(popFactor);
   const expWin = expectedScore(winnerElo, loserElo);
-  const delta = k * (1 - expWin);
+  // Floor first (FIFO matchmaking → can't avoid a low-Elo opponent), then
+  // apply the forfeit penalty so a forfeit-win is strictly below a guess-win
+  // at every matchup, including the floor.
+  let delta = Math.max(MIN_WIN_DELTA, k * (1 - expWin));
+  if (forfeit) delta *= FORFEIT_MULT;
 
   // Whole-number ratings: round the resulting Elo, then derive the deltas
   // from the rounded values so what's shown ("+27") always equals the actual
   // change in the displayed rating.
+  const loserLoss = Math.max(MIN_LOSS_DELTA, delta * LOSS_MULT);
   const winnerAfter = Math.round(winnerElo + delta);
-  const loserAfter = Math.round(floor(loserElo - delta * LOSS_MULT));
+  const loserAfter = Math.round(floor(loserElo - loserLoss));
 
   return {
     kEff: round1(k),

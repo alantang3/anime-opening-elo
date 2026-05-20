@@ -486,7 +486,11 @@ function settleWin(match, winnerConn) {
   const w = freshSnapshot(winnerConn);
   const l = freshSnapshot(loserConn);
   const pop = match.popularity || { factor: 0.5 };
-  const r = resolveWin(w.eloRaw, l.eloRaw, pop.factor);
+  // disconnectForfeit is set for both voluntary forfeits and real disconnects
+  // — either way the win wasn't earned via a correct guess, so it's worth less.
+  const r = resolveWin(w.eloRaw, l.eloRaw, pop.factor, {
+    forfeit: !!match.disconnectForfeit,
+  });
 
   applyMatchResult({
     outcome: match.disconnectForfeit ? "disconnect" : "win",

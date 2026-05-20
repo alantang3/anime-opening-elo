@@ -256,6 +256,54 @@ button.danger:hover:not(:disabled) {
 .result .delta-neg { color: var(--danger); }
 .result .answer { font-size: 18px; font-weight: 600; }
 
+/* Layout the song/anime info on the left with Yuzu on the right (only
+   rendered when the local player won the round). */
+.result-body {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.result-info { flex: 1; min-width: 0; }
+/* Wrap so the bubble can be absolutely positioned relative to Yuzu and
+   doesn't escape the result card's padding. margin-right pulls her off the
+   panel's right edge a bit. */
+.result-yuzu-wrap {
+  position: relative;
+  flex-shrink: 0;
+  margin-right: 12px;
+  width: 140px;
+  align-self: flex-start;
+}
+.result-yuzu {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 180px;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.35));
+}
+/* Bubble sits above-left of Yuzu (above her megaphone). width:75% so it
+   never escapes the wrap's bounds (which is already inside the result card). */
+.result-yuzu-bubble {
+  position: absolute;
+  top: -8px;
+  left: -52px;
+  width: 78%;
+  height: auto;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3));
+}
+@media (max-width: 720px) {
+  .result-yuzu-wrap { width: 96px; margin-right: 8px; }
+  .result-yuzu { max-height: 130px; }
+  .result-yuzu-bubble { left: -36px; top: -4px; }
+}
+
 .history {
   margin-top: 32px;
   background: var(--panel);
@@ -937,6 +985,18 @@ button.danger:hover:not(:disabled) {
   border-top: 1px solid var(--border);
   padding-top: 16px;
 }
+/* Aki sits above the stat grid as the page mascot — centered, modest size,
+   subtle drop-shadow to match the other mascot stickers (Yuzu, Yui, Nyalea). */
+.stats-aki {
+  display: block;
+  margin: 0 auto 12px;
+  width: clamp(140px, 28vh, 220px);
+  height: auto;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.32));
+}
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -1269,6 +1329,39 @@ button.danger:hover:not(:disabled) {
   will-change: transform;
 }
 .found-overlay.lift { transform: translateY(-100%); }
+
+/* Yui flash on wrong guess — translucent full-screen overlay that fades
+   straight back into the game (no lift like Kitsune). Total visible time
+   is 500ms, driven by App.jsx; the CSS just handles the fade-out tail. */
+.yui-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 54;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 7, 12, 0.45);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  pointer-events: none;
+  animation: yuiFlash 0.5s ease-out both;
+}
+.yui-figure {
+  display: block;
+  width: clamp(220px, 36vh, 380px);
+  height: auto;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 0 24px rgba(94, 158, 230, 0.28))
+    drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45));
+}
+@keyframes yuiFlash {
+  0%   { opacity: 0; }
+  20%  { opacity: 1; }
+  100% { opacity: 0; }
+}
 .found-figure {
   position: relative;
   width: clamp(320px, 58vh, 520px);
