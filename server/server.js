@@ -173,25 +173,25 @@ app.get("/api/search", async (req, res) => {
 const GHOST_PLAYERS = [
   // Records scale with Elo and are ALL winning: ~81% win rate at the top
   // tapering to ~56% at the bottom (still positive), more games up top.
-  { id: "ghost:1",  nickname: "KamiSpeed",   elo: 4821, wins: 712, losses: 168, draws: 0, avatar: "/default.png" },
-  { id: "ghost:2",  nickname: "OPSniper",    elo: 4398, wins: 680, losses: 176, draws: 0, avatar: "/default.png" },
-  { id: "ghost:3",  nickname: "SakuraBlitz", elo: 4267, wins: 651, losses: 184, draws: 0, avatar: "/default.png" },
-  { id: "ghost:4",  nickname: "ZeroFrame",   elo: 4148, wins: 624, losses: 191, draws: 0, avatar: "/default.png" },
-  { id: "ghost:5",  nickname: "TitanEar",    elo: 4022, wins: 598, losses: 198, draws: 0, avatar: "/default.png" },
-  { id: "ghost:6",  nickname: "RamenGod",    elo: 3902, wins: 573, losses: 205, draws: 0, avatar: "/default.png" },
-  { id: "ghost:7",  nickname: "NanoDesu",    elo: 3784, wins: 549, losses: 211, draws: 0, avatar: "/default.png" },
-  { id: "ghost:8",  nickname: "EdTune",      elo: 3667, wins: 526, losses: 216, draws: 0, avatar: "/default.png" },
-  { id: "ghost:9",  nickname: "PlusUltra",   elo: 3541, wins: 504, losses: 221, draws: 0, avatar: "/default.png" },
-  { id: "ghost:10", nickname: "SenpaiFM",    elo: 3423, wins: 483, losses: 225, draws: 0, avatar: "/default.png" },
-  { id: "ghost:11", nickname: "GokuVibes",   elo: 3300, wins: 462, losses: 229, draws: 0, avatar: "/default.png" },
-  { id: "ghost:12", nickname: "MikuMain",    elo: 3188, wins: 442, losses: 232, draws: 0, avatar: "/default.png" },
-  { id: "ghost:13", nickname: "ChibiRush",   elo: 3060, wins: 423, losses: 235, draws: 0, avatar: "/default.png" },
-  { id: "ghost:14", nickname: "OtakuPrime",  elo: 2954, wins: 405, losses: 237, draws: 0, avatar: "/default.png" },
-  { id: "ghost:15", nickname: "LoFiLeaf",    elo: 2845, wins: 388, losses: 239, draws: 0, avatar: "/default.png" },
-  { id: "ghost:16", nickname: "AceQuill",    elo: 2736, wins: 371, losses: 240, draws: 0, avatar: "/default.png" },
-  { id: "ghost:17", nickname: "NovaBeat",    elo: 2622, wins: 355, losses: 241, draws: 0, avatar: "/default.png" },
-  { id: "ghost:18", nickname: "RoninLoop",   elo: 2526, wins: 340, losses: 242, draws: 0, avatar: "/default.png" },
-  { id: "ghost:19", nickname: "HikariWave",  elo: 2428, wins: 326, losses: 242, draws: 0, avatar: "/default.png" },
+  { id: "ghost:1",  nickname: "KamiSpeed",   elo: 4821, wins: 712, losses: 168, draws: 52, avatar: "/default.png" },
+  { id: "ghost:2",  nickname: "OPSniper",    elo: 4398, wins: 680, losses: 176, draws: 48, avatar: "/default.png" },
+  { id: "ghost:3",  nickname: "SakuraBlitz", elo: 4267, wins: 651, losses: 184, draws: 27, avatar: "/default.png" },
+  { id: "ghost:4",  nickname: "ZeroFrame",   elo: 4148, wins: 624, losses: 191, draws: 31, avatar: "/default.png" },
+  { id: "ghost:5",  nickname: "TitanEar",    elo: 4022, wins: 598, losses: 198, draws: 29, avatar: "/default.png" },
+  { id: "ghost:6",  nickname: "RamenGod",    elo: 3902, wins: 573, losses: 205, draws: 26, avatar: "/default.png" },
+  { id: "ghost:7",  nickname: "NanoDesu",    elo: 3784, wins: 549, losses: 211, draws: 33, avatar: "/default.png" },
+  { id: "ghost:8",  nickname: "EdTune",      elo: 3667, wins: 526, losses: 216, draws: 37, avatar: "/default.png" },
+  { id: "ghost:9",  nickname: "PlusUltra",   elo: 3541, wins: 504, losses: 221, draws: 43, avatar: "/default.png" },
+  { id: "ghost:10", nickname: "SenpaiFM",    elo: 3423, wins: 483, losses: 225, draws: 22, avatar: "/default.png" },
+  { id: "ghost:11", nickname: "GokuVibes",   elo: 3300, wins: 462, losses: 229, draws: 19, avatar: "/default.png" },
+  { id: "ghost:12", nickname: "MikuMain",    elo: 3188, wins: 442, losses: 232, draws: 101, avatar: "/default.png" },
+  { id: "ghost:13", nickname: "ChibiRush",   elo: 3060, wins: 423, losses: 235, draws: 24, avatar: "/default.png" },
+  { id: "ghost:14", nickname: "OtakuPrime",  elo: 2954, wins: 405, losses: 237, draws: 18, avatar: "/default.png" },
+  { id: "ghost:15", nickname: "LoFiLeaf",    elo: 2845, wins: 388, losses: 239, draws: 17, avatar: "/default.png" },
+  { id: "ghost:16", nickname: "AceQuill",    elo: 2736, wins: 371, losses: 240, draws: 23, avatar: "/default.png" },
+  { id: "ghost:17", nickname: "NovaBeat",    elo: 2622, wins: 355, losses: 241, draws: 24, avatar: "/default.png" },
+  { id: "ghost:18", nickname: "RoninLoop",   elo: 2526, wins: 340, losses: 242, draws: 29, avatar: "/default.png" },
+  { id: "ghost:19", nickname: "HikariWave",  elo: 2428, wins: 326, losses: 242, draws: 17, avatar: "/default.png" },
 ];
 
 app.get("/api/leaderboard", (_req, res) => {
@@ -545,11 +545,11 @@ function settleWin(match, winnerConn) {
     malId: match.opening.malId,
     durationMs: match.startedAt ? Date.now() - match.startedAt : 0,
     winner: {
-      id: w.id, eloBefore: w.eloRaw, eloAfter: r.winnerAfter,
+      id: w.id, nickname: w.nickname, eloBefore: w.eloRaw, eloAfter: r.winnerAfter,
       wins: w.wins, losses: w.losses, draws: w.draws,
     },
     loser: {
-      id: l.id, eloBefore: l.eloRaw, eloAfter: r.loserAfter,
+      id: l.id, nickname: l.nickname, eloBefore: l.eloRaw, eloAfter: r.loserAfter,
       wins: l.wins, losses: l.losses, draws: l.draws,
     },
   });
@@ -601,8 +601,8 @@ function onRoundTimeout(match) {
     animeName: match.opening.anime.name,
     malId: match.opening.malId,
     durationMs: match.durationMs,
-    a: { id: a.id, eloBefore: a.eloRaw, eloAfter: r.aAfter, wins: a.wins, losses: a.losses, draws: a.draws },
-    b: { id: b.id, eloBefore: b.eloRaw, eloAfter: r.bAfter, wins: b.wins, losses: b.losses, draws: b.draws },
+    a: { id: a.id, nickname: a.nickname, eloBefore: a.eloRaw, eloAfter: r.aAfter, wins: a.wins, losses: a.losses, draws: a.draws },
+    b: { id: b.id, nickname: b.nickname, eloBefore: b.eloRaw, eloAfter: r.bAfter, wins: b.wins, losses: b.losses, draws: b.draws },
   });
 
   for (const m of match.members) {

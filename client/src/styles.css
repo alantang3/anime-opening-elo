@@ -715,14 +715,15 @@ button.danger:hover:not(:disabled) {
 .gsign-g { width: 18px; height: 18px; }
 
 /* Play-as-guest button: purple-on-white-text, balanced to .gsign so the
-   two CTAs read as a matched pair. Lives directly under Sign in with Google
-   on the AUTH screen, and also as the submit inside the guest modal. */
+   two CTAs read as a matched pair. Sits on its OWN row directly under
+   Sign in with Google (display: flex makes it block-level so it can't
+   line up beside the gsign button on wide screens). */
 .guest-btn {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
-  width: auto;
+  width: fit-content;
   margin: 12px auto 0;
   padding: 12px 22px;
   background: var(--accent);

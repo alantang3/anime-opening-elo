@@ -43,7 +43,7 @@ async function ingestPopular(entry) {
   const slug = await animeSlugForMalId(entry.malId);
   if (!slug) return 0; // not catalogued on AnimeThemes
   const res = await getAnimeOpenings(slug);
-  if (!res || !res.themes.length) return 0; // no OP (e.g. a movie)
+  if (!res || !res.themes.length) return 0; // no OPs *or* EDs catalogued — skip
   const detail = await getAnimeDetail(slug); // series/synonyms for matching
 
   const { accepted, franchiseKey } = buildAcceptedAnswers({

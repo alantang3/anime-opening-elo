@@ -117,8 +117,11 @@ export async function getThemeVideoLinks(animeSlug, themeSlug) {
       `${BASE}/anime/${encodeURIComponent(animeSlug)}` +
         `?include=animethemes.animethemeentries.videos`
     );
+    // Include both OPs and EDs since some pooled entries (movies w/o OPs)
+    // are ED-based. The picked theme_slug priority below still keeps the
+    // same theme first regardless of type.
     const themes = (data.anime?.animethemes || []).filter(
-      (t) => t.type === "OP"
+      (t) => t.type === "OP" || t.type === "ED"
     );
     const linksFor = (t) => {
       const out = [];
@@ -160,9 +163,11 @@ export async function animeSlugForMalId(malId) {
   }
 }
 
-// One specific anime (by slug) with its id/name/year and every OP theme
-// (best encode + song title each). Used to seed the pool with a curated list
-// of famous shows so they're guaranteed present, not left to random sampling.
+// One specific anime (by slug) with its id/name/year and its themes (best
+// encode + song title each). Prefers OPs; if the show has no OPs at all
+// (movies like Demon Slayer: Mugen Train, Weathering With You, Haikyuu!!
+// movies — typically have only an ED) it falls back to EDs so those shows
+// can still be pooled. Mixed-content shows still only contribute their OPs.
 export async function getAnimeOpenings(slug) {
   if (!slug) return null;
   try {
@@ -172,24 +177,29 @@ export async function getAnimeOpenings(slug) {
     );
     const a = data.anime;
     if (!a) return null;
-    const themes = [];
-    for (const t of a.animethemes || []) {
-      if (t.type !== "OP") continue;
-      for (const entry of t.animethemeentries || []) {
-        const v = [...(entry.videos || [])].sort(
-          (x, y) => (y.resolution || 0) - (x.resolution || 0)
-        )[0];
-        if (v?.link) {
-          themes.push({
-            slug: t.slug,
-            song: t.song?.title || null,
-            link: v.link,
-            audio: v.audio?.link || null, // direct .ogg song (preferred)
-          });
-          break;
+    const collect = (wantType) => {
+      const out = [];
+      for (const t of a.animethemes || []) {
+        if (t.type !== wantType) continue;
+        for (const entry of t.animethemeentries || []) {
+          const v = [...(entry.videos || [])].sort(
+            (x, y) => (y.resolution || 0) - (x.resolution || 0)
+          )[0];
+          if (v?.link) {
+            out.push({
+              slug: t.slug,
+              song: t.song?.title || null,
+              link: v.link,
+              audio: v.audio?.link || null, // direct .ogg song (preferred)
+            });
+            break;
+          }
         }
       }
-    }
+      return out;
+    };
+    let themes = collect("OP");
+    if (!themes.length) themes = collect("ED");
     return { anime: { id: a.id, name: a.name, slug: a.slug, year: a.year }, themes };
   } catch {
     return null;

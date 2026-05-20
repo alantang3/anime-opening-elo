@@ -108,6 +108,13 @@ ensureColumn("players", "avatar", "TEXT");
 ensureColumn("players", "avatar_is_custom", "INTEGER"); // user-uploaded pic
 ensureColumn("players", "peak_elo", "REAL"); // highest Elo ever reached
 ensureColumn("openings", "audio_link", "TEXT"); // direct .ogg song (preferred)
+// Snapshot the opponent's display name on the match row. Necessary for bot
+// opponents — bots have no DB row, so the LEFT JOIN to players returns NULL
+// and the history used to fall back to the literal string "Bot", which
+// tipped players off. Now we record the bot's plausible-handle name at
+// insert time so it reads exactly like a human opponent.
+ensureColumn("match_history", "winner_name", "TEXT");
+ensureColumn("match_history", "loser_name", "TEXT");
 db.exec(`UPDATE players SET peak_elo = elo WHERE peak_elo IS NULL`);
 db.exec(
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_google
@@ -164,7 +171,11 @@ const stmt = {
            h.winner_id, h.loser_id,
            h.winner_elo_after, h.loser_elo_after,
            h.winner_elo_before, h.loser_elo_before,
-           wp.nickname AS winner_name, lp.nickname AS loser_name
+           -- Prefer the snapshotted name (works for bots, which have no
+           -- players row). Fall back to the current player nickname for
+           -- old rows inserted before the columns existed.
+           COALESCE(h.winner_name, wp.nickname) AS winner_name,
+           COALESCE(h.loser_name,  lp.nickname) AS loser_name
       FROM match_history h
       LEFT JOIN players wp ON wp.id = h.winner_id
       LEFT JOIN players lp ON lp.id = h.loser_id
@@ -220,10 +231,12 @@ const stmt = {
   insertMatch: db.prepare(`
     INSERT INTO match_history
       (played_at, anime_name, mal_id, outcome, winner_id, loser_id,
+       winner_name, loser_name,
        winner_elo_before, winner_elo_after, loser_elo_before, loser_elo_after,
        duration_ms)
     VALUES
       (@played_at, @anime_name, @mal_id, @outcome, @winner_id, @loser_id,
+       @winner_name, @loser_name,
        @winner_elo_before, @winner_elo_after, @loser_elo_before,
        @loser_elo_after, @duration_ms)
   `),
@@ -357,7 +370,11 @@ export function getPlayerStats(id, limit = 12) {
       anime: m.anime_name,
       outcome: m.outcome,
       youWon: isTimeout ? false : won,
-      opponent: oppName || "Bot",
+      // New rows always have a snapshotted opponent name (including the bot's
+      // plausible handle, e.g. "kuro_92"). Old rows pre-column that opposed a
+      // bot have NULL here — fall back to a neutral placeholder, NOT "Bot",
+      // since that gives the game away.
+      opponent: oppName || "Unknown",
       eloAfter: after != null ? Math.round(after) : null,
       delta:
         before != null && after != null
@@ -401,6 +418,7 @@ export const applyMatchResult = db.transaction((r) => {
       played_at: now, anime_name: r.animeName, mal_id: r.malId,
       outcome: "timeout",
       winner_id: r.a.id, loser_id: r.b.id,
+      winner_name: r.a.nickname || null, loser_name: r.b.nickname || null,
       winner_elo_before: r.a.eloBefore ?? null, winner_elo_after: r.a.eloAfter,
       loser_elo_before: r.b.eloBefore ?? null,  loser_elo_after: r.b.eloAfter,
       duration_ms: r.durationMs,
@@ -428,6 +446,8 @@ export const applyMatchResult = db.transaction((r) => {
   stmt.insertMatch.run({
     played_at: now, anime_name: r.animeName, mal_id: r.malId,
     outcome: r.outcome, winner_id: r.winner.id, loser_id: r.loser.id,
+    winner_name: r.winner.nickname || null,
+    loser_name: r.loser.nickname || null,
     winner_elo_before: r.winner.eloBefore, winner_elo_after: r.winner.eloAfter,
     loser_elo_before: r.loser.eloBefore, loser_elo_after: r.loser.eloAfter,
     duration_ms: r.durationMs,
