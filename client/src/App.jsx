@@ -363,7 +363,7 @@ export default function App() {
         // then fades back into the game (no blinds-up like Kitsune).
         clearTimeout(yuiTimer.current);
         setYuiVisible(true);
-        yuiTimer.current = setTimeout(() => setYuiVisible(false), 500);
+        yuiTimer.current = setTimeout(() => setYuiVisible(false), 750);
       }
     });
     socket.on("opponent:guessed", () => {
@@ -528,7 +528,7 @@ export default function App() {
       setInviteGhosted(false);
       return;
     }
-    const t = setTimeout(() => setInviteGhosted(true), 10_000);
+    const t = setTimeout(() => setInviteGhosted(true), 20_000);
     return () => clearTimeout(t);
   }, [phase]);
 
@@ -1393,11 +1393,13 @@ export default function App() {
             </div>
 
             <div className="play-stage">
-              {/* Anime God (Elo ≥ 4800) replaces Nyalea with Mochi — same slot,
-                  same .nyalea class so size/position are 1:1. */}
+              {/* TEMP: Mochi threshold lowered from Anime God (4800) to 800 so
+                  it can be previewed without grinding to the top rank — flip
+                  back to 4800 before launch. Same .nyalea class so size/pos
+                  are 1:1 with the default sprite. */}
               <img
                 className="nyalea"
-                src={(me?.elo ?? 0) >= 4800 ? "/mochi.png" : "/nyalea.png"}
+                src={(me?.elo ?? 0) >= 800 ? "/mochi.png" : "/nyalea.png"}
                 alt=""
               />
               <div className="play-actions">

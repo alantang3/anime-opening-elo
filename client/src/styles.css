@@ -1310,7 +1310,9 @@ button.danger:hover:not(:disabled) {
   position: relative;
   display: block;
   margin: 20px auto 8px;
-  width: clamp(220px, 42vh, 360px);
+  /* Matched to Nyalea on the home screen (clamp(220px, 30vh, 330px)) so the
+     invite-friend panel stays within the viewport like the home page. */
+  width: clamp(220px, 30vh, 330px);
 }
 .invite-hina {
   display: block;
@@ -1415,7 +1417,7 @@ button.danger:hover:not(:disabled) {
   backdrop-filter: blur(2px);
   -webkit-backdrop-filter: blur(2px);
   pointer-events: none;
-  animation: yuiFlash 0.5s ease-out both;
+  animation: yuiFlash 0.75s ease-out both;
 }
 .yui-figure {
   display: block;
