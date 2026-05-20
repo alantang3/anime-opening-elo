@@ -16,6 +16,10 @@ const PHASE = {
 // How long Mimiko shows the "wait" pose (after a match is found) before the
 // match screen takes over — long enough to actually register.
 const FOUND_HOLD_MS = 1200;
+// Total time the matchup curtain occupies the screen — kept in sync with
+// the CSS animation (~0.8s hold + ~0.8s part). After this, the curtain JSX
+// unmounts and the underlying battle stage is fully interactive.
+const CURTAIN_TOTAL_MS = 1600;
 
 const LS_TOKEN = "aoe.token";
 const LS_VOL = "aoe.volume";
@@ -181,6 +185,26 @@ export default function App() {
   // spam the server (reset on round:prepare).
   const unplayableSentRef = useRef(false);
   const altReqRef = useRef(false); // an alternate-video request is in flight
+  // Self-unstick if the server's alternate reply is ever lost — without
+  // this, altReqRef stays true forever and the UI sits in "trying…" with
+  // no way to recover (the bug behind "stuck in battle, can't submit").
+  const altReqTimeoutRef = useRef(null);
+  // Mirror `phase` into a ref so long-lived socket listeners (registered
+  // once via [] effect) can read the CURRENT phase, not the stale closure
+  // value from when they were registered.
+  const phaseRef = useRef("auth");
+  // Result-page video retries: bounded high enough to walk every alternate
+  // the server has (typically 5-20 URLs); the server returns null when its
+  // alternate list is exhausted, which is the real termination signal. The
+  // cap is just defensive against bugs that re-emit the same URL.
+  const resultRetriesRef = useRef(0);
+  const RESULT_MAX_RETRIES = 40;
+  // Video prefetched into the browser cache once the audio is fully buffered
+  // (`canplaythrough` event). The result-page replay then loads from cache
+  // instantly. We track the prefetched <link> element so we can clean it up
+  // when the round ends or the URL changes.
+  const prefetchLinkRef = useRef(null);
+  const prefetchedUrlRef = useRef(null);
   const lastFailReasonRef = useRef("unplayable");
   const watchdogRef = useRef(null); // detects "loaded but not actually playing"
   const matchStartTimer = useRef(null);
@@ -294,17 +318,29 @@ export default function App() {
         //   bubble case → kitsune alone 1s, bubble pops in, 1s with bubble,
         //                 then lift (total 2s on screen before the blinds lift).
         //   no bubble   → kitsune alone 1s, then lift.
+        // After Kitsune fully leaves, the matchup curtain drops in. Holds
+        // for ~1.5s showing both players' cards, then parts to reveal the
+        // battle. Total curtain time is bounded by the CSS animation (kept
+        // in sync with CURTAIN_TOTAL_MS).
+        const showCurtainAfter = (kitsuneTotalMs) => {
+          setTimeout(() => {
+            setMatchStarting(true);
+            setTimeout(() => setMatchStarting(false), CURTAIN_TOTAL_MS);
+          }, kitsuneTotalMs);
+        };
         if (bubble) {
           setTimeout(() => setBubbleVisible(true), 1000);
           setTimeout(() => {
             setFoundOverlay("up");
             setTimeout(() => setFoundOverlay(null), 500);
           }, 2000);
+          showCurtainAfter(2500); // kitsune in (2000ms) + lift (500ms)
         } else {
           setTimeout(() => {
             setFoundOverlay("up");
             setTimeout(() => setFoundOverlay(null), 500);
           }, 1000);
+          showCurtainAfter(1500); // kitsune in (1000ms) + lift (500ms)
         }
       }, FOUND_HOLD_MS);
     });
@@ -319,6 +355,7 @@ export default function App() {
       setNeedTap(false);
       setAudioFailed(false);
       unplayableSentRef.current = false;
+      resultRetriesRef.current = 0;
       altReqRef.current = false;
       clearTimeout(watchdogRef.current);
       setRoundInfo({
@@ -352,14 +389,29 @@ export default function App() {
     // or (url == null) we're out of alternates → scrap the round.
     socket.on("round:altVideo", ({ url }) => {
       altReqRef.current = false;
+      clearTimeout(altReqTimeoutRef.current);
       if (url) {
         setNotice(null);
         setNeedTap(false);
         setAudioFailed(true); // alternates are video links
         setRoundInfo((prev) => (prev ? { ...prev, videoUrl: url } : prev));
-      } else {
+      } else if (phaseRef.current !== PHASE.RESULT) {
+        // Live round and we're out of alternates → void the round.
         reportUnplayable(lastFailReasonRef.current || "unplayable");
       }
+      // Result-page exhaustion: do nothing. Round is already settled, so a
+      // dead replay just leaves an empty player — better than disrupting
+      // the post-round flow.
+    });
+
+    // Server says "your guess fired but the round isn't live anymore on my
+    // side" — a round:end was lost in flight, leaving the UI wedged in a
+    // dead-battle state. Park the user on the RESULT screen as if the
+    // opponent left, so they always have actionable buttons (Find New
+    // Opponent / Home / etc.) and never get auto-transitioned somewhere
+    // they can't escape without a click.
+    socket.on("match:resync", () => {
+      parkOnResultDeadGame("Round was lost in transit — pick where to go next.");
     });
 
     socket.on("guess:result", ({ correct }) => {
@@ -538,6 +590,17 @@ export default function App() {
     return () => clearTimeout(t);
   }, [phase]);
 
+  // Keep phaseRef in sync so socket listeners can see the current phase.
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  // Returning to the home page wipes any lingering notice (opponent left,
+  // rematch expired, "trying another…", upload errors, etc). The lobby
+  // should always be a clean slate — those messages were context for a
+  // moment that's over by the time you're back home.
+  useEffect(() => {
+    if (phase === PHASE.LOBBY) setNotice(null);
+  }, [phase]);
+
   // Use Google's OAuth token flow so we render OUR OWN themed button instead
   // of Google's white iframe widget.
   useEffect(() => {
@@ -638,6 +701,30 @@ export default function App() {
     setPhase(PHASE.AUTH);
   }
 
+  // "Dead-game" recovery: any time the client desynced from the server and
+  // the round can't be salvaged (lost round:end, alt-fetch timeout, etc.),
+  // park the user on the RESULT screen with the opponent-left layout — they
+  // ALWAYS see actionable buttons (Find New Opponent / Home), never a
+  // wedged battle UI. Synthesizes a minimal `result` object since we don't
+  // have the real one. No Elo or stats are written by this — server-side
+  // bookkeeping is whatever it is.
+  function parkOnResultDeadGame(msg) {
+    stopTimer();
+    clearTimeout(altReqTimeoutRef.current);
+    altReqRef.current = false;
+    unplayableSentRef.current = true; // suppress any further unplayable emits
+    const elo = me?.elo ?? 0;
+    setResult({
+      outcome: "unplayable",
+      answer: null,
+      result: { youWon: false, eloBefore: elo, eloAfter: elo, delta: 0 },
+    });
+    setOppGone(true);
+    setVotes({ you: null, opponent: null });
+    setPhase(PHASE.RESULT);
+    setNotice(msg || null);
+  }
+
   // The opening genuinely can't play on THIS screen (bad CDN/codec/region,
   // or even a tap couldn't start it). One round can't continue with only one
   // side hearing it, so tell the server to scrap it and re-queue both of us.
@@ -660,6 +747,20 @@ export default function App() {
       url: roundInfo?.videoUrl,
       reason,
     });
+    // If the server never replies (lost packet / weird state), unstick after
+    // 12s by parking on the RESULT screen with exit buttons — NEVER leave
+    // the user trapped in "trying another…" with no escape.
+    clearTimeout(altReqTimeoutRef.current);
+    altReqTimeoutRef.current = setTimeout(() => {
+      if (!altReqRef.current) return; // server already replied
+      if (phaseRef.current === PHASE.PLAYING ||
+          phaseRef.current === PHASE.COUNTDOWN ||
+          phaseRef.current === PHASE.PREPARE) {
+        parkOnResultDeadGame("Couldn't load that opening — pick where to go next.");
+      } else {
+        altReqRef.current = false;
+      }
+    }, 12_000);
   }
 
   // Single entry point for "the round media isn't playing here" (load error,
@@ -775,6 +876,62 @@ export default function App() {
   useEffect(() => {
     if (videoRef.current) videoRef.current.volume = volume;
   }, [volume, roundSrc, phase]);
+
+  // ---------- Result-page video PREFETCH ----------
+  // While the audio is playing, once it's fully buffered (`canplaythrough`),
+  // start a low-priority prefetch of the round's video URL into the browser
+  // HTTP cache. By the time we transition to PHASE.RESULT and mount the
+  // <video> element with that URL, the bytes are already cached and the
+  // replay plays instantly — no network round-trip, no first-load failures.
+  //
+  // Triggered on the audio's canplaythrough so we never compete with the
+  // audio download for bandwidth. Falls back to a 10s safety timer in case
+  // canplaythrough never fires (slow connection, broken codec). Removes the
+  // <link> tag when the round ends or roundSrc changes (new round / new
+  // alternate URL) so we don't leak prefetches across rounds.
+  useEffect(() => {
+    if (phase !== PHASE.PLAYING) return;
+    const videoUrl = roundInfo?.videoUrl;
+    if (!videoUrl) return;
+    // Skip if the round's audio source IS the video URL (one and the same)
+    // or if we already prefetched this URL for this round.
+    if (videoUrl === roundSrc) return;
+    if (prefetchedUrlRef.current === videoUrl) return;
+
+    const startPrefetch = () => {
+      if (prefetchedUrlRef.current === videoUrl) return;
+      prefetchedUrlRef.current = videoUrl;
+      const link = document.createElement("link");
+      link.rel = "prefetch";
+      link.as = "video";
+      link.href = videoUrl;
+      document.head.appendChild(link);
+      prefetchLinkRef.current = link;
+    };
+
+    const el = videoRef.current;
+    const onReady = () => startPrefetch();
+    // canplaythrough = browser believes the WHOLE audio can play without
+    // buffering. After that, network is idle and prefetch is safe.
+    el?.addEventListener("canplaythrough", onReady, { once: true });
+    const safety = setTimeout(startPrefetch, 10_000);
+
+    return () => {
+      clearTimeout(safety);
+      el?.removeEventListener("canplaythrough", onReady);
+    };
+  }, [phase, roundInfo?.videoUrl, roundSrc]);
+
+  // Cleanup: drop the <link> tag whenever we leave the round, so a new round
+  // starts with a clean slate (and we don't pin old URLs in the cache forever).
+  useEffect(() => {
+    if (phase === PHASE.PLAYING || phase === PHASE.RESULT) return;
+    if (prefetchLinkRef.current) {
+      prefetchLinkRef.current.remove();
+      prefetchLinkRef.current = null;
+    }
+    prefetchedUrlRef.current = null;
+  }, [phase]);
 
   // Queue: show mimiko; after 5s with no match, switch to mimikosleep.
   useEffect(() => {
@@ -1631,11 +1788,6 @@ export default function App() {
         {/* ---------- Match ---------- */}
         {inMatch && (
           <>
-            {midoriShown && phase === PHASE.PLAYING && (
-              <div className="battle-midori" aria-hidden="true">
-                <img src="/midori.png" alt="" />
-              </div>
-            )}
             <div
               className={"match-stage" + (matchStarting ? " is-opening" : "")}
             >
@@ -1654,14 +1806,32 @@ export default function App() {
                 onLoadedMetadata={onLoadedMetadata}
                 onError={() => {
                   if (!roundSrc) return;
-                  // A media error on the live round (not the RESULT replay):
-                  // fall back (audio→video→alternate) before scrapping it.
+                  // Live round: fall back (audio→video→alternate) before
+                  // scrapping it.
                   if (
                     phase === PHASE.PREPARE ||
                     phase === PHASE.COUNTDOWN ||
                     phase === PHASE.PLAYING
                   ) {
                     onMediaTrouble("mediaerror");
+                    return;
+                  }
+                  // RESULT replay failed: try an alternate encode LOCALLY
+                  // via the same server endpoint. Capped to avoid an
+                  // infinite swap loop on a series of dead URLs. Never
+                  // escalates to "void the round" — the round is settled,
+                  // each user's replay is independent.
+                  if (
+                    phase === PHASE.RESULT &&
+                    resultRetriesRef.current < RESULT_MAX_RETRIES &&
+                    !altReqRef.current
+                  ) {
+                    resultRetriesRef.current += 1;
+                    altReqRef.current = true;
+                    socketRef.current?.emit("round:videoFailed", {
+                      url: roundInfo?.videoUrl,
+                      reason: "result:mediaerror",
+                    });
                   }
                 }}
                 style={{
@@ -1716,23 +1886,15 @@ export default function App() {
 
               {matchStarting && (
                 <div className="curtain" aria-hidden="true">
+                  {/* The curtain panels reuse the same PlayerBadge that lives
+                      on the battle stage — same rank color, same pfp, same
+                      Elo — so the matchup looks identical before/after the
+                      curtain parts. */}
                   <div className="curtain-panel curtain-left">
-                    <span className="curtain-eyebrow">YOU</span>
-                    <span className="curtain-ava">
-                      <img src={me?.avatar || "/default.png"} alt="" referrerPolicy="no-referrer" />
-                    </span>
-                    <span className="curtain-name">{me?.nickname}</span>
+                    <PlayerBadge p={me} label="YOU" />
                   </div>
                   <div className="curtain-panel curtain-right">
-                    <span className="curtain-eyebrow">OPPONENT</span>
-                    <span className="curtain-ava">
-                      <img
-                        src={opponent?.avatar || "/default.png"}
-                        alt=""
-                        referrerPolicy="no-referrer"
-                      />
-                    </span>
-                    <span className="curtain-name">{opponent?.nickname}</span>
+                    <PlayerBadge p={opponent} label="OPPONENT" />
                   </div>
                 </div>
               )}

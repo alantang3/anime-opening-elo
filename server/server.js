@@ -491,7 +491,15 @@ function beginCountdown(match) {
 }
 
 function handleGuess(match, conn, { animeId, guessText } = {}) {
-  if (!match || match.state !== "playing") return;
+  // If the round isn't actively playing on the server but the client still
+  // thinks it is (likely a lost round:end during the video-alternate dance),
+  // tell the client to resync so the UI doesn't stay wedged in an
+  // un-submittable battle screen. Without this, guesses silently disappear.
+  if (!match) return;
+  if (match.state !== "playing") {
+    conn.socket.emit("match:resync", { state: match.state });
+    return;
+  }
   // Correct if they picked the exact entry from autocomplete, OR typed any
   // accepted franchise name (English / Japanese / acronym / dub / any
   // season or movie title of the franchise).
@@ -1121,7 +1129,10 @@ io.on("connection", (socket) => {
     const c = conns.get(socket.id);
     const m = c?.matchId && matches.get(c.matchId);
     if (!m) return;
-    if (!["preparing", "countdown", "playing"].includes(m.state)) return;
+    // Also serve alternates during the RESULT replay so a failed result-page
+    // video can swap in another encode locally — no need to void anything
+    // since the round is already settled.
+    if (!["preparing", "countdown", "playing", "result"].includes(m.state)) return;
     const slug = m.opening?.anime?.slug;
     if (!slug) return socket.emit("round:altVideo", { url: null });
     if (!m.altLinksP)

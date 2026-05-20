@@ -217,14 +217,14 @@ input[type="text"]:focus {
 .img-btn {
   flex: 0 0 auto;                         /* override the global `button { flex:1 }` */
   display: block;
-  width: clamp(170px, 22vw, 220px);
+  width: clamp(120px, 15vw, 160px);
   aspect-ratio: 2.5 / 1;
   padding: 0;
   background: none;
   border: none;
   cursor: pointer;
   transition: transform 0.14s ease, filter 0.14s ease;
-  filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.4));
+  filter: drop-shadow(0 5px 10px rgba(0, 0, 0, 0.4));
 }
 .img-btn img {
   display: block;
@@ -250,7 +250,7 @@ input[type="text"]:focus {
 }
 /* Standalone Find New Opponent is wider since it's not paired. */
 .img-btn-row.solo .img-btn {
-  width: clamp(200px, 28vw, 280px);
+  width: clamp(150px, 20vw, 200px);
 }
 button {
   flex: 1;
@@ -316,11 +316,17 @@ button.danger:hover:not(:disabled) {
 /* Wrap so the bubble can be absolutely positioned relative to Yuzu and
    doesn't escape the result card's padding. margin-right pulls her off the
    panel's right edge a bit. */
+/* Reserve dedicated empty space at the top of the wrap so the speech
+   bubble lives in its own real estate — same trick that lets Kitsune's
+   bubble sit in an empty corner of her canvas without touching her. Yuzu
+   herself (and Kuro) stay the same size; the wrap just gets taller so the
+   bubble sits ABOVE the character with a clean gap. */
 .result-yuzu-wrap {
   position: relative;
   flex-shrink: 0;
   margin-right: 12px;
   width: 140px;
+  padding-top: 96px;
   align-self: flex-start;
 }
 .result-yuzu {
@@ -333,23 +339,26 @@ button.danger:hover:not(:disabled) {
   -webkit-user-drag: none;
   filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.35));
 }
-/* Bubble sits above-left of Yuzu (above her megaphone). width:75% so it
-   never escapes the wrap's bounds (which is already inside the result card). */
+/* Bubble fills the top padding area; never touches Yuzu/Kuro. The slight
+   negative right offset lets the tail (which points down-right toward the
+   character) land just above her head. */
 .result-yuzu-bubble {
   position: absolute;
-  top: -8px;
-  left: -52px;
-  width: 78%;
+  top: 0;
+  right: -6%;
+  width: 100%;
+  max-height: 86px;
   height: auto;
+  object-fit: contain;
   pointer-events: none;
   user-select: none;
   -webkit-user-drag: none;
   filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3));
 }
 @media (max-width: 720px) {
-  .result-yuzu-wrap { width: 96px; margin-right: 8px; }
+  .result-yuzu-wrap { width: 96px; margin-right: 8px; padding-top: 70px; }
   .result-yuzu { max-height: 130px; }
-  .result-yuzu-bubble { left: -36px; top: -4px; }
+  .result-yuzu-bubble { right: -4%; max-height: 64px; }
 }
 
 .history {
@@ -832,15 +841,20 @@ button.danger:hover:not(:disabled) {
 }
 .vs-rankbar {
   width: 100%;
-  padding: 10px 8px 9px;
-  /* No longer a separate coloured band — the card already is the colour;
-     just a faint divider. */
+  /* Tighter top padding pushes YOU / OPPONENT right up to the top edge.
+     min-height keeps the rankbar at its ORIGINAL overall height — the
+     divider line stays put and the avatar / username / Elo positions
+     below are unchanged. justify-content: space-between distributes the
+     eyebrow to the top and the rank name to the bottom (just above the
+     divider) within that fixed-height block. */
+  padding: 3px 8px 6px;
+  min-height: 52px;
   background: transparent;
   border-bottom: 1px solid rgba(255, 255, 255, 0.15);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  justify-content: space-between;
 }
 .vs-eyebrow {
   color: rgba(255, 255, 255, 0.78);
@@ -922,14 +936,16 @@ button.danger:hover:not(:disabled) {
 }
 
 /* Reveal: cards slide in from the edges, the square scales up. */
+/* Side cards stay hidden until the curtain starts parting (~0.8s delay),
+   then slide in over ~0.7s — synced to the curtain split. */
 .match-stage.is-opening .stage-left {
-  animation: sideInL 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: sideInL 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.8s both;
 }
 .match-stage.is-opening .stage-right {
-  animation: sideInR 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: sideInR 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.8s both;
 }
 .match-stage.is-opening .stage-center {
-  animation: stageReveal 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: stageReveal 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.8s both;
 }
 @keyframes sideInL {
   0%, 22% { transform: translateX(36px); opacity: 0; }
@@ -968,20 +984,23 @@ button.danger:hover:not(:disabled) {
     var(--panel)
   );
 }
+/* Curtain dwell: ~0.8s holding (PlayerBadges readable but brief), then
+   ~0.8s parting. Total matches CURTAIN_TOTAL_MS (1.6s). */
 .curtain-left {
   border-right: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  animation: curtainPartL 0.95s cubic-bezier(0.76, 0, 0.24, 1) forwards;
+  animation: curtainPartL 1.55s cubic-bezier(0.76, 0, 0.24, 1) forwards;
 }
 .curtain-right {
   border-left: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  animation: curtainPartR 0.95s cubic-bezier(0.76, 0, 0.24, 1) forwards;
+  animation: curtainPartR 1.55s cubic-bezier(0.76, 0, 0.24, 1) forwards;
 }
 @keyframes curtainPartL {
-  0%, 26% { transform: translateX(0); }
+  /* Hold 0–50% (~0.78s), then slide 50–100% (~0.78s). */
+  0%, 50% { transform: translateX(0); }
   100% { transform: translateX(-101%); }
 }
 @keyframes curtainPartR {
-  0%, 26% { transform: translateX(0); }
+  0%, 50% { transform: translateX(0); }
   100% { transform: translateX(101%); }
 }
 .curtain-eyebrow {
