@@ -178,7 +178,7 @@ const stmt = {
      WHERE winner_id = @id AND outcome = 'win' AND duration_ms > 0
   `),
   topPlayers: db.prepare(`
-    SELECT id, nickname, elo, wins, losses, draws
+    SELECT id, nickname, elo, wins, losses, draws, avatar
       FROM players
      ORDER BY elo DESC
      LIMIT ?
@@ -192,6 +192,12 @@ const stmt = {
       titles = @titles, fetched_at = @now
   `),
   getByGoogle: db.prepare(`SELECT * FROM players WHERE google_sub = ?`),
+  insertGuest: db.prepare(`
+    INSERT INTO players
+      (id, nickname, elo, created_at, last_seen, auth_provider, avatar)
+    VALUES
+      (@id, @nickname, @elo, @now, @now, 'guest', @avatar)
+  `),
   insertGoogle: db.prepare(`
     INSERT INTO players
       (id, nickname, elo, created_at, last_seen,
@@ -297,6 +303,25 @@ export function getOrCreateGooglePlayer({ sub, name, email, picture }) {
   return stmt.getByGoogle.get(sub);
 }
 
+// Create a brand-new guest account (no Google auth, no email). The nickname
+// is whatever the user typed in the guest modal; avatar is the URL of any
+// uploaded pfp, or null (the client falls back to /default.png). Returns the
+// row so the caller can issue a session.
+export function createGuestPlayer({ nickname, avatar }) {
+  const clean =
+    String(nickname || "").replace(/\s+/g, " ").trim().slice(0, 24) || "Guest";
+  const id = crypto.randomUUID();
+  const now = nowISO();
+  stmt.insertGuest.run({
+    id,
+    nickname: clean,
+    elo: DEFAULT_ELO,
+    now,
+    avatar: avatar || null,
+  });
+  return stmt.getPlayer.get(id);
+}
+
 // Set a player's chosen display name. Returns the updated row (or null).
 export function setNickname(id, nickname) {
   const clean = String(nickname || "").replace(/\s+/g, " ").trim().slice(0, 24);
@@ -367,21 +392,34 @@ export const applyMatchResult = db.transaction((r) => {
         wins: p.wins, losses: p.losses, draws: p.draws + 1, now,
       });
     }
+    // Store both participants in winner_id/loser_id (arbitrary which side)
+    // so the recent-matches query (filtered by winner_id|loser_id) actually
+    // picks the draw up in both players' histories. The client uses
+    // outcome === "timeout" to render this as DRAW regardless of which
+    // player landed in the "winner" column.
     stmt.insertMatch.run({
       played_at: now, anime_name: r.animeName, mal_id: r.malId,
-      outcome: "timeout", winner_id: null, loser_id: null,
-      winner_elo_before: null, winner_elo_after: null,
-      loser_elo_before: null, loser_elo_after: null,
+      outcome: "timeout",
+      winner_id: r.a.id, loser_id: r.b.id,
+      winner_elo_before: r.a.eloBefore ?? null, winner_elo_after: r.a.eloAfter,
+      loser_elo_before: r.b.eloBefore ?? null,  loser_elo_after: r.b.eloAfter,
       duration_ms: r.durationMs,
     });
     return;
   }
 
-  stmt.setRecord.run({
-    id: r.winner.id, elo: r.winner.eloAfter,
-    wins: r.winner.wins + 1, losses: r.winner.losses,
-    draws: r.winner.draws, now,
-  });
+  // A voluntary forfeit is a "no contest" for the non-forfeit side: their
+  // Elo and W/L are unchanged (no wins-counter farm) while the forfeiter
+  // takes a real loss. resolveWin already zeroed out winnerGain so their
+  // eloAfter equals eloBefore here.
+  const isForfeit = r.outcome === "forfeit";
+  if (!isForfeit) {
+    stmt.setRecord.run({
+      id: r.winner.id, elo: r.winner.eloAfter,
+      wins: r.winner.wins + 1, losses: r.winner.losses,
+      draws: r.winner.draws, now,
+    });
+  }
   stmt.setRecord.run({
     id: r.loser.id, elo: r.loser.eloAfter,
     wins: r.loser.wins, losses: r.loser.losses + 1,

@@ -26,6 +26,7 @@ import {
   leaderboard,
   setNickname,
   setCustomAvatar,
+  createGuestPlayer,
   getPlayerStats,
   DATA_DIR,
 } from "./db.js";
@@ -39,6 +40,7 @@ import {
   loginWithGoogle,
   loginWithGoogleAccessToken,
   verifySession,
+  issueSession,
 } from "./auth.js";
 
 // ---------- Tunables ----------
@@ -105,6 +107,40 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
+// Guest sign-in: takes a nickname and optional base64 avatar (data URL),
+// creates a brand-new account, returns a session token like Google does.
+// No password, no email — they just play as that account until they clear
+// their browser. Same rate-limit and image-size rules as the avatar upload.
+app.post("/api/auth/guest", (req, res) => {
+  try {
+    const { nickname, avatar: dataUrl } = req.body || {};
+    const clean = String(nickname || "").replace(/\s+/g, " ").trim().slice(0, 24);
+    if (clean.length < 2)
+      return res.status(400).json({ error: "name must be 2-24 chars" });
+    // First create the player (so we have an id to key the avatar file by).
+    let player = createGuestPlayer({ nickname: clean, avatar: null });
+    // Optional avatar upload via base64 data URL.
+    if (dataUrl) {
+      const m = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(String(dataUrl));
+      if (!m) return res.status(400).json({ error: "expected png/jpeg/webp" });
+      const buf = Buffer.from(m[2], "base64");
+      if (buf.length > 1_200_000)
+        return res.status(413).json({ error: "image too large (max ~1.2MB)" });
+      const ext = AVATAR_EXT[m[1]];
+      try {
+        fs.writeFileSync(path.join(AVATAR_DIR, `${player.id}.${ext}`), buf);
+      } catch {
+        return res.status(500).json({ error: "could not save image" });
+      }
+      player = setCustomAvatar(player.id, `/avatars/${player.id}.${ext}?t=${Date.now()}`);
+    }
+    res.json({ token: issueSession(player), player: publicPlayer(player) });
+  } catch (err) {
+    console.error("auth/guest:", err.message);
+    res.status(500).json({ error: "guest sign-in failed" });
+  }
+});
+
 // Autocomplete is the other per-keystroke AnimeThemes call, so cache it:
 // short TTL + small LRU. Many users type the same prefixes ("nar", "one"…),
 // so this collapses huge numbers of identical lookups into one.
@@ -137,25 +173,25 @@ app.get("/api/search", async (req, res) => {
 const GHOST_PLAYERS = [
   // Records scale with Elo and are ALL winning: ~81% win rate at the top
   // tapering to ~56% at the bottom (still positive), more games up top.
-  { id: "ghost:1", nickname: "KamiSpeed", elo: 4821, wins: 712, losses: 168 },
-  { id: "ghost:2", nickname: "OPSniper", elo: 4398, wins: 680, losses: 176 },
-  { id: "ghost:3", nickname: "SakuraBlitz", elo: 4267, wins: 651, losses: 184 },
-  { id: "ghost:4", nickname: "ZeroFrame", elo: 4148, wins: 624, losses: 191 },
-  { id: "ghost:5", nickname: "TitanEar", elo: 4022, wins: 598, losses: 198 },
-  { id: "ghost:6", nickname: "RamenGod", elo: 3902, wins: 573, losses: 205 },
-  { id: "ghost:7", nickname: "NanoDesu", elo: 3784, wins: 549, losses: 211 },
-  { id: "ghost:8", nickname: "EdTune", elo: 3667, wins: 526, losses: 216 },
-  { id: "ghost:9", nickname: "PlusUltra", elo: 3541, wins: 504, losses: 221 },
-  { id: "ghost:10", nickname: "SenpaiFM", elo: 3423, wins: 483, losses: 225 },
-  { id: "ghost:11", nickname: "GokuVibes", elo: 3300, wins: 462, losses: 229 },
-  { id: "ghost:12", nickname: "MikuMain", elo: 3188, wins: 442, losses: 232 },
-  { id: "ghost:13", nickname: "ChibiRush", elo: 3060, wins: 423, losses: 235 },
-  { id: "ghost:14", nickname: "OtakuPrime", elo: 2954, wins: 405, losses: 237 },
-  { id: "ghost:15", nickname: "LoFiLeaf", elo: 2845, wins: 388, losses: 239 },
-  { id: "ghost:16", nickname: "AceQuill", elo: 2736, wins: 371, losses: 240 },
-  { id: "ghost:17", nickname: "NovaBeat", elo: 2622, wins: 355, losses: 241 },
-  { id: "ghost:18", nickname: "RoninLoop", elo: 25206, wins: 340, losses: 242 },
-  { id: "ghost:19", nickname: "HikariWave", elo: 2428, wins: 326, losses: 242 },
+  { id: "ghost:1",  nickname: "KamiSpeed",   elo: 4821, wins: 712, losses: 168, draws: 0, avatar: "/default.png" },
+  { id: "ghost:2",  nickname: "OPSniper",    elo: 4398, wins: 680, losses: 176, draws: 0, avatar: "/default.png" },
+  { id: "ghost:3",  nickname: "SakuraBlitz", elo: 4267, wins: 651, losses: 184, draws: 0, avatar: "/default.png" },
+  { id: "ghost:4",  nickname: "ZeroFrame",   elo: 4148, wins: 624, losses: 191, draws: 0, avatar: "/default.png" },
+  { id: "ghost:5",  nickname: "TitanEar",    elo: 4022, wins: 598, losses: 198, draws: 0, avatar: "/default.png" },
+  { id: "ghost:6",  nickname: "RamenGod",    elo: 3902, wins: 573, losses: 205, draws: 0, avatar: "/default.png" },
+  { id: "ghost:7",  nickname: "NanoDesu",    elo: 3784, wins: 549, losses: 211, draws: 0, avatar: "/default.png" },
+  { id: "ghost:8",  nickname: "EdTune",      elo: 3667, wins: 526, losses: 216, draws: 0, avatar: "/default.png" },
+  { id: "ghost:9",  nickname: "PlusUltra",   elo: 3541, wins: 504, losses: 221, draws: 0, avatar: "/default.png" },
+  { id: "ghost:10", nickname: "SenpaiFM",    elo: 3423, wins: 483, losses: 225, draws: 0, avatar: "/default.png" },
+  { id: "ghost:11", nickname: "GokuVibes",   elo: 3300, wins: 462, losses: 229, draws: 0, avatar: "/default.png" },
+  { id: "ghost:12", nickname: "MikuMain",    elo: 3188, wins: 442, losses: 232, draws: 0, avatar: "/default.png" },
+  { id: "ghost:13", nickname: "ChibiRush",   elo: 3060, wins: 423, losses: 235, draws: 0, avatar: "/default.png" },
+  { id: "ghost:14", nickname: "OtakuPrime",  elo: 2954, wins: 405, losses: 237, draws: 0, avatar: "/default.png" },
+  { id: "ghost:15", nickname: "LoFiLeaf",    elo: 2845, wins: 388, losses: 239, draws: 0, avatar: "/default.png" },
+  { id: "ghost:16", nickname: "AceQuill",    elo: 2736, wins: 371, losses: 240, draws: 0, avatar: "/default.png" },
+  { id: "ghost:17", nickname: "NovaBeat",    elo: 2622, wins: 355, losses: 241, draws: 0, avatar: "/default.png" },
+  { id: "ghost:18", nickname: "RoninLoop",   elo: 2526, wins: 340, losses: 242, draws: 0, avatar: "/default.png" },
+  { id: "ghost:19", nickname: "HikariWave",  elo: 2428, wins: 326, losses: 242, draws: 0, avatar: "/default.png" },
 ];
 
 app.get("/api/leaderboard", (_req, res) => {
@@ -485,14 +521,26 @@ function settleWin(match, winnerConn) {
   const w = freshSnapshot(winnerConn);
   const l = freshSnapshot(loserConn);
   const pop = match.popularity || { factor: 0.5 };
-  // disconnectForfeit is set for both voluntary forfeits and real disconnects
-  // — either way the win wasn't earned via a correct guess, so it's worth less.
+  // disconnectForfeit is set for both voluntary forfeits and real disconnects.
+  // voluntary is set ONLY when the loser hit the Forfeit button — in that
+  // case the winner gains 0 Elo (kills the wait-out farm meta) but the
+  // forfeiter still takes their normal forfeit-scaled loss.
   const r = resolveWin(w.eloRaw, l.eloRaw, pop.factor, {
     forfeit: !!match.disconnectForfeit,
+    voluntary: !!match.voluntary,
   });
 
+  // Outcome label: voluntary forfeit gets its own value so the recent-matches
+  // history can render it differently (NC for the non-forfeit player, LOSS
+  // for the forfeiter) from a real network disconnect.
+  const outcomeLabel = match.voluntary
+    ? "forfeit"
+    : match.disconnectForfeit
+    ? "disconnect"
+    : "win";
+
   applyMatchResult({
-    outcome: match.disconnectForfeit ? "disconnect" : "win",
+    outcome: outcomeLabel,
     animeName: match.opening.anime.name,
     malId: match.opening.malId,
     durationMs: match.startedAt ? Date.now() - match.startedAt : 0,
@@ -515,10 +563,10 @@ function settleWin(match, winnerConn) {
   }
 
   emitRoundEnd(match, {
-    outcome: match.disconnectForfeit ? "disconnect" : "win",
+    outcome: outcomeLabel,
     // True only when the loser pressed Forfeit; false for a real network
-    // disconnect (also outcome "disconnect" but no voluntary action). Used
-    // client-side to vary post-round mascot art.
+    // disconnect. Kept on the wire so existing Kuro/result-panel logic
+    // that checks `voluntary` keeps working alongside the new outcome label.
     voluntary: !!match.voluntary,
     [winnerConn.socket.id]: {
       youWon: true,
@@ -553,8 +601,8 @@ function onRoundTimeout(match) {
     animeName: match.opening.anime.name,
     malId: match.opening.malId,
     durationMs: match.durationMs,
-    a: { id: a.id, eloAfter: r.aAfter, wins: a.wins, losses: a.losses, draws: a.draws },
-    b: { id: b.id, eloAfter: r.bAfter, wins: b.wins, losses: b.losses, draws: b.draws },
+    a: { id: a.id, eloBefore: a.eloRaw, eloAfter: r.aAfter, wins: a.wins, losses: a.losses, draws: a.draws },
+    b: { id: b.id, eloBefore: b.eloRaw, eloAfter: r.bAfter, wins: b.wins, losses: b.losses, draws: b.draws },
   });
 
   for (const m of match.members) {
@@ -748,7 +796,12 @@ function parkAfterOpponentGone(match, reason, survivors) {
   }
 }
 
-// A disconnect mid-play is a forfeit: the remaining player wins that round.
+// A disconnect AFTER the round actually started (state "playing") is a
+// forfeit — refresh/close-tab can't be a free escape from a losing round.
+// A disconnect DURING the 3-2-1 countdown (or while still preparing) is a
+// "genuine" disconnect: the round hadn't really started, so neither side
+// loses Elo. The boundary is the countdown timer expiring → state becomes
+// "playing".
 function handleDisconnectDuringMatch(match, goneConn) {
   const other = match.members.find((c) => c !== goneConn);
   if (!other) {
@@ -756,14 +809,14 @@ function handleDisconnectDuringMatch(match, goneConn) {
     return;
   }
 
-  if (match.state === "playing" || match.state === "countdown") {
+  if (match.state === "playing") {
     match.disconnectForfeit = true;
-    // Force the round end window into a state settleWin accepts.
-    match.state = "playing";
+    // Funnel into the same path as the Forfeit button: disconnecter takes
+    // the Elo loss + LOSS in history; surviving player gets 0 Elo + NC
+    // (kills the rage-quit-to-farm meta). Once the round has started you
+    // are committed — exit-tab/refresh costs you exactly like Forfeit.
+    match.voluntary = true;
     settleWin(match, other); // survivor wins this round and sees the result
-    // ...and stays parked on that result (opening still playable) instead of
-    // being thrown back into the queue. settleWin started a rematch
-    // handshake; parkAfterOpponentGone tears it back down.
     parkAfterOpponentGone(match, "opponent_disconnected", [other]);
     return;
   }
@@ -775,14 +828,21 @@ function handleDisconnectDuringMatch(match, goneConn) {
     return;
   }
 
-  // Disconnect while still preparing (nothing to watch yet): drop the
-  // survivor to the lobby — no auto-requeue, they re-queue when ready.
+  // Pre-round disconnect (state "preparing" or "countdown"): GENUINE drop,
+  // no Elo for either side. Round hadn't really begun — punishing the
+  // surviving player here would be unfair. Drop the survivor to the lobby
+  // with a notice; they re-queue when ready.
   clearTimers(match);
   matches.delete(match.id);
   other.socket.leave(match.id);
   other.matchId = null;
   other.status = "idle";
-  other.socket.emit("match:over", { reason: "opponent_left" });
+  other.socket.emit("match:over", {
+    reason:
+      match.state === "countdown"
+        ? "opponent_disconnected_pre_round"
+        : "opponent_left",
+  });
 }
 
 // A voluntary mid-round forfeit (the "Forfeit"/leave button). Unlike a real
@@ -792,9 +852,34 @@ function handleDisconnectDuringMatch(match, goneConn) {
 // can choose to play each other again.
 function voluntaryForfeit(match, leaverConn) {
   if (!matches.has(match.id)) return;
-  if (match.state !== "playing" && match.state !== "countdown") return;
   const winner = match.members.find((c) => c !== leaverConn);
   if (!winner) return;
+
+  // Forfeit (or Home-click) in ANY in-match phase costs Elo. The pre-round
+  // "no Elo" carve-out only applies to GENUINE disconnects — clicking Home
+  // is a voluntary action and is treated as forfeit even during buffering
+  // or the 3-2-1 countdown. (The client also greys out the Home button
+  // mid-match as a UX hint.)
+  // Edge case: state === "preparing" before the opening is picked (~ms
+  // race) — we can't settle Elo without round info, so cancel cleanly.
+  if (match.state === "preparing" && !match.opening) {
+    clearTimers(match);
+    matches.delete(match.id);
+    for (const c of match.members) {
+      if (c.isBot) continue;
+      c.socket.leave(match.id);
+      c.matchId = null;
+      c.status = "idle";
+      c.socket.emit("match:over", { reason: "match_cancelled" });
+    }
+    return;
+  }
+  if (
+    match.state !== "preparing" &&
+    match.state !== "countdown" &&
+    match.state !== "playing"
+  ) return;
+
   match.disconnectForfeit = true; // result reads "You forfeited" / "…you win"
   match.voluntary = true;         // distinguishes from real network disconnect
   match.state = "playing";        // shape the window settleWin expects
@@ -826,7 +911,9 @@ function makeBotConn(humanConn) {
       wins: 0,
       losses: 0,
       draws: 0,
-      avatar: null,
+      // Default avatar (purple silhouette) so bots match real-player UI and
+      // don't expose their bot-ness via a blank-pfp tell.
+      avatar: "/default.png",
     },
     status: "match",
     matchId: null,

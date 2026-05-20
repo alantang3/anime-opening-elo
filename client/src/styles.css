@@ -204,6 +204,54 @@ input[type="text"]:focus {
   gap: 10px;
   margin-top: 16px;
 }
+
+/* Image buttons (Submit / Forfeit during play, Play Again / New Opponent
+   after the round, Find New Opponent when the opponent's gone). All four
+   inline buttons share the same outer box size so the layout stays put
+   when Submit/Forfeit are replaced by Play Again/New Opponent at round-end. */
+.img-btn-row {
+  align-items: center;
+  justify-content: center;
+}
+.img-btn-row.solo { justify-content: center; }
+.img-btn {
+  flex: 0 0 auto;                         /* override the global `button { flex:1 }` */
+  display: block;
+  width: clamp(170px, 22vw, 220px);
+  aspect-ratio: 2.5 / 1;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: transform 0.14s ease, filter 0.14s ease;
+  filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.4));
+}
+.img-btn img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.img-btn:hover:not(:disabled) {
+  transform: scale(1.08);
+  z-index: 1;
+  /* Same accent-color glow as the Play button on the home page, so all
+     image buttons feel like one family. */
+  filter: drop-shadow(0 0 22px color-mix(in srgb, var(--accent) 60%, transparent))
+    drop-shadow(0 12px 20px rgba(0, 0, 0, 0.5));
+}
+.img-btn:active:not(:disabled) { transform: scale(0.97); }
+.img-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.35)) grayscale(0.15);
+}
+/* Standalone Find New Opponent is wider since it's not paired. */
+.img-btn-row.solo .img-btn {
+  width: clamp(200px, 28vw, 280px);
+}
 button {
   flex: 1;
   background: var(--accent);
@@ -324,6 +372,7 @@ button.danger:hover:not(:disabled) {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
   padding: 11px 12px;
   margin-bottom: 4px;
   border: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 28%, transparent);
@@ -344,7 +393,21 @@ button.danger:hover:not(:disabled) {
     color-mix(in srgb, var(--rank, var(--accent)) 12%, var(--panel))
   );
 }
+/* Avatar pill on the leaderboard row. Sized to match the row height so it
+   sits flush with the player name. Always renders an <img> (server sends
+   /default.png for guests/ghosts without a pic). */
+.lb-ava {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1.5px solid color-mix(in srgb, var(--rank, var(--accent)) 50%, transparent);
+  background: var(--panel-2);
+}
 .history-row .name {
+  flex: 1;
+  min-width: 0;
   color: color-mix(in srgb, var(--rank, var(--accent)) 70%, #ffffff);
   font-weight: 700;
 }
@@ -651,6 +714,35 @@ button.danger:hover:not(:disabled) {
 .gsign:disabled { opacity: 0.6; cursor: progress; }
 .gsign-g { width: 18px; height: 18px; }
 
+/* Play-as-guest button: purple-on-white-text, balanced to .gsign so the
+   two CTAs read as a matched pair. Lives directly under Sign in with Google
+   on the AUTH screen, and also as the submit inside the guest modal. */
+.guest-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: auto;
+  margin: 12px auto 0;
+  padding: 12px 22px;
+  background: var(--accent);
+  color: #ffffff;
+  border: none;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(139, 92, 246, 0.35);
+  transition: transform 0.08s ease, box-shadow 0.2s ease, filter 0.14s ease;
+  flex: none;
+}
+.guest-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 26px rgba(139, 92, 246, 0.5);
+  filter: brightness(1.06);
+}
+.guest-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
 /* ---------- Avatars + rank ---------- */
 .avatar-fallback {
   display: inline-flex;
@@ -791,17 +883,13 @@ button.danger:hover:not(:disabled) {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- Match stage: YOU | square | OPPONENT, with curtain reveal ---
-   Pushed down from the page top so Midori has room to sit above without
-   colliding with the AniTune header. The clamp scales with viewport
-   height so short laptops don't waste screen real estate. */
+/* ---------- Match stage: YOU | square | OPPONENT, with curtain reveal --- */
 .match-stage {
   position: relative;
   display: flex;
   align-items: stretch;
   justify-content: center;
   gap: 12px;
-  margin-top: clamp(28px, 9vh, 110px);
   margin-bottom: 12px;
   overflow: hidden;
   border-radius: 16px;
@@ -1053,7 +1141,14 @@ button.danger:hover:not(:disabled) {
 }
 .m-res.win { background: rgba(78, 201, 176, 0.18); color: var(--good); }
 .m-res.loss { background: rgba(255, 107, 107, 0.16); color: var(--danger); }
-.m-res.draw { background: var(--panel-2); color: var(--muted); }
+/* DRAW = gold so it pops between WIN (green) and LOSS (red) and stays
+   distinct from NC's neutral grey. */
+.m-res.draw { background: rgba(255, 191, 36, 0.16); color: #fbbf24; }
+/* "NC" = No Contest. Shown when the opponent voluntarily forfeited or
+   disconnected — the round didn't determine anything for us (no Elo
+   gained), but we don't want to label it WIN or LOSS. Greyed-out to read
+   as neutral. */
+.m-res.nc { background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.55); }
 .m-anime {
   flex: 1;
   overflow: hidden;
@@ -1376,26 +1471,28 @@ button.danger:hover:not(:disabled) {
 .found-overlay.lift { transform: translateY(-100%); }
 
 /* Midori as the "30 seconds in, lock in" mascot at the top of the battle
-   screen — fades in once and stays until round end. Sits in the gap that
-   .match-stage's margin-top opens up between the header and the battle
-   stage. Negative margin-bottom lets her bottom overlap the stage line
-   slightly so she feels seated on top of the stage. */
+   screen — fades in once and stays until round end. Sized to fit the
+   ambient gap above the battle stage WITHOUT pushing the stage down;
+   that means constraining by HEIGHT (her sprite is portrait, so a fixed
+   width would still spill far below the natural gap). Small top/bottom
+   padding so she doesn't kiss the card edge or the stage line. */
 .battle-midori {
   display: flex;
   justify-content: center;
-  margin: 0 0 -12px;
+  padding: 6px 0 8px;
+  margin: 0;
   pointer-events: none;
   animation: midoriFadeIn 0.6s ease-out both;
 }
 .battle-midori img {
   display: block;
-  width: clamp(160px, 30vh, 260px);
-  height: auto;
+  height: clamp(88px, 13vh, 140px);
+  width: auto;
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
-  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.32))
-    drop-shadow(0 0 22px rgba(74, 222, 128, 0.18));
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.32))
+    drop-shadow(0 0 18px rgba(74, 222, 128, 0.18));
 }
 @keyframes midoriFadeIn {
   0%   { opacity: 0; transform: translateY(-6px); }

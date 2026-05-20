@@ -152,6 +152,13 @@ export default function App() {
   // Hina gets a "Ghosted?" bubble if the friend invite has been pending
   // for >= 10s.
   const [inviteGhosted, setInviteGhosted] = useState(false);
+  // Play-as-guest modal state.
+  const [guestOpen, setGuestOpen] = useState(false);
+  const [guestName, setGuestName] = useState("");
+  const [guestAvatarDataUrl, setGuestAvatarDataUrl] = useState(null);
+  const [guestBusy, setGuestBusy] = useState(false);
+  const [guestError, setGuestError] = useState(null);
+  const guestFileRef = useRef(null);
   const [stats, setStats] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false); // header dropdown
   const [panel, setPanel] = useState(null); // null | "profile" | "stats"
@@ -415,8 +422,7 @@ export default function App() {
       // (nobody truly lost) or real disconnect.
       const decisiveLoss =
         !youWon &&
-        (data?.outcome === "win" ||
-          (data?.outcome === "disconnect" && data?.voluntary));
+        (data?.outcome === "win" || data?.outcome === "forfeit");
       if (youWon) {
         winStreakRef.current += 1;
         lossStreakRef.current = 0;
@@ -561,6 +567,48 @@ export default function App() {
     if (!tokenClientRef.current) return;
     setNotice(null);
     tokenClientRef.current.requestAccessToken();
+  }
+
+  // ---------- Guest sign-in ----------
+  async function submitGuest() {
+    const name = guestName.trim();
+    if (name.length < 2) {
+      setGuestError("name must be at least 2 characters");
+      return;
+    }
+    setGuestBusy(true);
+    setGuestError(null);
+    try {
+      const r = await fetch("/api/auth/guest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nickname: name, avatar: guestAvatarDataUrl || null }),
+      }).then((x) => x.json());
+      if (!r.token) throw new Error(r.error || "guest sign-in failed");
+      localStorage.setItem(LS_TOKEN, r.token);
+      tokenRef.current = r.token;
+      setMe(r.player);
+      setGuestOpen(false);
+      setGuestName("");
+      setGuestAvatarDataUrl(null);
+      socketRef.current?.emit("auth", { token: r.token });
+      setPhase(PHASE.LOBBY);
+    } catch (e) {
+      setGuestError(String(e.message || e));
+    } finally {
+      setGuestBusy(false);
+    }
+  }
+  function pickGuestAvatar(file) {
+    if (!file) return;
+    if (file.size > 1_200_000) {
+      setGuestError("image too large (max ~1.2 MB)");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setGuestAvatarDataUrl(String(reader.result || ""));
+    reader.onerror = () => setGuestError("could not read image");
+    reader.readAsDataURL(file);
   }
 
   async function handleGoogleToken(accessToken) {
@@ -1047,10 +1095,12 @@ export default function App() {
           <span className="vs-rankname">{rank.name}</span>
         </div>
         <div className="vs-ava-wrap">
-          {p.avatar ? (
+          {/* Always render an <img>; falls back to the purple default avatar
+              (also shipped to bots so they don't look bot-ish via blank pfp). */}
+          {true ? (
             <img
               className="vs-ava"
-              src={p.avatar}
+              src={p.avatar || "/default.png"}
               alt=""
               referrerPolicy="no-referrer"
             />
@@ -1076,7 +1126,8 @@ export default function App() {
           className="title-wrap"
           onClick={goHome}
           role="button"
-          title="Home"
+          tabIndex={0}
+          title={inMatch ? "Leaving forfeits — you'll lose Elo" : "Home"}
         >
           <img src="/anitune.png" alt="AniTune" className="app-icon" />
           <div className="title">
@@ -1091,8 +1142,8 @@ export default function App() {
               aria-haspopup="menu"
               aria-expanded={menuOpen}
             >
-              {me.avatar ? (
-                <img className="avatar" src={me.avatar} alt="" referrerPolicy="no-referrer" />
+              {true ? (
+                <img className="avatar" src={me.avatar || "/default.png"} alt="" referrerPolicy="no-referrer" />
               ) : (
                 <span className="avatar avatar-fallback">
                   {initialOf(me.nickname)}
@@ -1178,6 +1229,73 @@ export default function App() {
         </div>
       )}
 
+      {guestOpen && (
+        <div className="modal-backdrop" onClick={() => !guestBusy && setGuestOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Play as guest</h3>
+              <button
+                className="modal-x"
+                onClick={() => setGuestOpen(false)}
+                disabled={guestBusy}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="profile-ava">
+              <div
+                className="lobby-ava"
+                onClick={() => guestFileRef.current?.click()}
+                title="Upload picture"
+              >
+                <img
+                  src={guestAvatarDataUrl || "/default.png"}
+                  alt=""
+                />
+                <span className="lobby-ava-edit">✎</span>
+              </div>
+              <input
+                ref={guestFileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  pickGuestAvatar(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+            </div>
+            <div className="name-editor">
+              <label>Username</label>
+              <div className="name-row">
+                <input
+                  type="text"
+                  value={guestName}
+                  maxLength={24}
+                  onChange={(e) => setGuestName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && !guestBusy && submitGuest()}
+                  placeholder="Display name"
+                  autoFocus
+                />
+              </div>
+            </div>
+            {guestError && (
+              <div className="notice" style={{ marginTop: 10 }}>{guestError}</div>
+            )}
+            <div className="button-row" style={{ justifyContent: "center" }}>
+              <button
+                className="guest-btn"
+                onClick={submitGuest}
+                disabled={guestBusy || guestName.trim().length < 2}
+                style={{ minWidth: 180 }}
+              >
+                {guestBusy ? "Creating…" : "Start playing"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {panel === "profile" && (
         <div className="modal-backdrop" onClick={closePanel}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1193,8 +1311,8 @@ export default function App() {
                 onClick={() => avatarInputRef.current?.click()}
                 title="Change picture"
               >
-                {me?.avatar ? (
-                  <img src={me.avatar} alt="" referrerPolicy="no-referrer" />
+                {true ? (
+                  <img src={me?.avatar || "/default.png"} alt="" referrerPolicy="no-referrer" />
                 ) : (
                   <span className="avatar-fallback">
                     {initialOf(me?.nickname)}
@@ -1283,24 +1401,25 @@ export default function App() {
                 {stats.recent.length === 0 && (
                   <div className="muted-row">No matches yet.</div>
                 )}
-                {stats.recent.map((m, i) => (
+                {stats.recent.map((m, i) => {
+                  // Outcome → label/class. Voluntary forfeit by the OPPONENT
+                  // (you "won" but get nothing) shows as NC; if YOU forfeited
+                  // it counts as a real LOSS (no dodging losses by quitting).
+                  let label = "LOSS";
+                  let cls = "loss";
+                  if (m.outcome === "timeout") {
+                    label = "DRAW";
+                    cls = "draw";
+                  } else if (m.outcome === "forfeit") {
+                    if (m.youWon) { label = "NC"; cls = "nc"; }
+                    // else falls through to LOSS/loss for the forfeiter
+                  } else if (m.youWon) {
+                    label = "WIN";
+                    cls = "win";
+                  }
+                  return (
                   <div className="match-row" key={i}>
-                    <span
-                      className={
-                        "m-res " +
-                        (m.outcome === "timeout"
-                          ? "draw"
-                          : m.youWon
-                          ? "win"
-                          : "loss")
-                      }
-                    >
-                      {m.outcome === "timeout"
-                        ? "DRAW"
-                        : m.youWon
-                        ? "WIN"
-                        : "LOSS"}
-                    </span>
+                    <span className={"m-res " + cls}>{label}</span>
                     <span className="m-anime">{m.anime || "—"}</span>
                     <span className="m-opp">vs {m.opponent}</span>
                     {m.delta != null && (
@@ -1312,7 +1431,8 @@ export default function App() {
                       </span>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1349,6 +1469,17 @@ export default function App() {
                   </svg>
                   {gsiReady ? "Sign in with Google" : "Loading…"}
                 </button>
+                <button
+                  className="guest-btn"
+                  onClick={() => {
+                    setGuestName("");
+                    setGuestAvatarDataUrl(null);
+                    setGuestError(null);
+                    setGuestOpen(true);
+                  }}
+                >
+                  Play as guest
+                </button>
                 <div className="hero-note">
                   Sign in so your Elo, rank, and leaderboard spot stay with
                   your account.
@@ -1363,8 +1494,8 @@ export default function App() {
           <div className="lobby">
             <div className="lobby-id">
               <div className="lobby-ava lobby-ava-ro">
-                {me?.avatar ? (
-                  <img src={me.avatar} alt="" referrerPolicy="no-referrer" />
+                {true ? (
+                  <img src={me?.avatar || "/default.png"} alt="" referrerPolicy="no-referrer" />
                 ) : (
                   <span className="avatar-fallback">
                     {initialOf(me?.nickname)}
@@ -1393,13 +1524,11 @@ export default function App() {
             </div>
 
             <div className="play-stage">
-              {/* TEMP: Mochi threshold lowered from Anime God (4800) to 800 so
-                  it can be previewed without grinding to the top rank — flip
-                  back to 4800 before launch. Same .nyalea class so size/pos
-                  are 1:1 with the default sprite. */}
+              {/* Mochi replaces Nyalea once you reach Anime God (Elo ≥ 4800).
+                  Same .nyalea class so size/position are 1:1 with the default. */}
               <img
                 className="nyalea"
-                src={(me?.elo ?? 0) >= 800 ? "/mochi.png" : "/nyalea.png"}
+                src={(me?.elo ?? 0) >= 4800 ? "/mochi.png" : "/nyalea.png"}
                 alt=""
               />
               <div className="play-actions">
@@ -1590,26 +1719,18 @@ export default function App() {
                   <div className="curtain-panel curtain-left">
                     <span className="curtain-eyebrow">YOU</span>
                     <span className="curtain-ava">
-                      {me?.avatar ? (
-                        <img src={me.avatar} alt="" referrerPolicy="no-referrer" />
-                      ) : (
-                        initialOf(me?.nickname)
-                      )}
+                      <img src={me?.avatar || "/default.png"} alt="" referrerPolicy="no-referrer" />
                     </span>
                     <span className="curtain-name">{me?.nickname}</span>
                   </div>
                   <div className="curtain-panel curtain-right">
                     <span className="curtain-eyebrow">OPPONENT</span>
                     <span className="curtain-ava">
-                      {opponent?.avatar ? (
-                        <img
-                          src={opponent.avatar}
-                          alt=""
-                          referrerPolicy="no-referrer"
-                        />
-                      ) : (
-                        initialOf(opponent?.nickname)
-                      )}
+                      <img
+                        src={opponent?.avatar || "/default.png"}
+                        alt=""
+                        referrerPolicy="no-referrer"
+                      />
                     </span>
                     <span className="curtain-name">{opponent?.nickname}</span>
                   </div>
@@ -1683,12 +1804,21 @@ export default function App() {
                     autoComplete="off"
                   />
                 </div>
-                <div className="button-row">
-                  <button onClick={submitGuess} disabled={!query.trim()}>
-                    Submit guess
+                <div className="button-row img-btn-row">
+                  <button
+                    className="img-btn"
+                    onClick={submitGuess}
+                    disabled={!query.trim()}
+                    aria-label="Submit guess"
+                  >
+                    <img src="/btn_submit.png" alt="Submit guess" />
                   </button>
-                  <button className="danger" onClick={leaveMatch}>
-                    Forfeit
+                  <button
+                    className="img-btn"
+                    onClick={leaveMatch}
+                    aria-label="Forfeit"
+                  >
+                    <img src="/btn_forfeit.png" alt="Forfeit" />
                   </button>
                 </div>
               </>
@@ -1722,6 +1852,12 @@ export default function App() {
                 key={p.id}
                 style={{ "--rank": rank.color }}
               >
+                <img
+                  className="lb-ava"
+                  src={p.avatar || "/default.png"}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                />
                 <div className="name">
                   {i + 1}. {p.nickname}
                   {title && (
@@ -1736,6 +1872,7 @@ export default function App() {
                 </div>
                 <div className="meta">
                   {p.elo} · {p.wins}W/{p.losses}L
+                  {(p.draws ?? 0) > 0 && <>/{p.draws}D</>}
                 </div>
               </div>
             );
@@ -1776,10 +1913,14 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
           ? "Opening wouldn't play — round skipped"
           : result.outcome === "timeout"
           ? "Time's up — nobody got it"
+          : result.outcome === "forfeit"
+          ? won
+            ? "Opponent forfeited — no contest"
+            : "You forfeited"
           : result.outcome === "disconnect"
           ? won
-            ? "Opponent forfeited — you win"
-            : "You forfeited"
+            ? "Opponent disconnected — you win"
+            : "You disconnected"
           : won
           ? "You got it first!"
           : "Opponent got it first"}
@@ -1830,8 +1971,7 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
             )}
           </div>
         ) : (
-            result.outcome === "win" ||
-            (result.outcome === "disconnect" && result.voluntary)
+            result.outcome === "win" || result.outcome === "forfeit"
           ) ? (
           <div className="result-yuzu-wrap" aria-hidden="true">
             <img className="result-yuzu" src="/kuro.png" alt="" />
@@ -1849,8 +1989,14 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
       {oppGone ? (
         <div className="rematch">
           <div className="rematch-q">Opponent left — match over.</div>
-          <div className="button-row">
-            <button onClick={onRequeue}>Find new opponent</button>
+          <div className="button-row img-btn-row solo">
+            <button
+              className="img-btn"
+              onClick={onRequeue}
+              aria-label="Find new opponent"
+            >
+              <img src="/btn_findnewopponent.png" alt="Find new opponent" />
+            </button>
           </div>
         </div>
       ) : (
@@ -1867,16 +2013,24 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
                 : "No"}
             </b>
           </div>
-          <div className="button-row">
-            <button onClick={() => onVote(true)} disabled={votes.you != null}>
-              {votes.you === true ? "Waiting for opponent…" : "Yes, rematch"}
+          <div className="button-row img-btn-row">
+            <button
+              className="img-btn"
+              onClick={() => onVote(true)}
+              disabled={votes.you != null}
+              aria-label={
+                votes.you === true ? "Waiting for opponent" : "Play again"
+              }
+            >
+              <img src="/btn_playagain.png" alt="Play again" />
             </button>
             <button
-              className="danger"
+              className="img-btn"
               onClick={() => onVote(false)}
               disabled={votes.you != null}
+              aria-label="New opponent"
             >
-              No, new opponent
+              <img src="/btn_newopponent.png" alt="New opponent" />
             </button>
           </div>
         </div>

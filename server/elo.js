@@ -64,15 +64,17 @@ export function effectiveK(popFactor) {
  * @param {object} [opts]
  * @param {boolean} [opts.forfeit] true if the win came from the opponent
  *   leaving / disconnecting (not from a correct guess) — scales the delta
- *   down by FORFEIT_MULT so it's worth less than a real guess win.
+ *   down by FORFEIT_MULT.
+ * @param {boolean} [opts.voluntary] true if the loser hit the Forfeit
+ *   button (a SUBSET of forfeit). Voluntary forfeits give the winner ZERO
+ *   Elo — otherwise the meta becomes baiting low-attention opponents into
+ *   leaving so you can farm their Elo. The forfeiter still loses normally
+ *   (so quitting isn't a way to dodge the loss).
  */
 export function resolveWin(winnerElo, loserElo, popFactor, opts = {}) {
-  const { forfeit = false } = opts;
+  const { forfeit = false, voluntary = false } = opts;
   const k = effectiveK(popFactor);
   const expWin = expectedScore(winnerElo, loserElo);
-  // Floor first (FIFO matchmaking → can't avoid a low-Elo opponent), then
-  // apply the forfeit penalty so a forfeit-win is strictly below a guess-win
-  // at every matchup, including the floor.
   let delta = Math.max(MIN_WIN_DELTA, k * (1 - expWin));
   if (forfeit) delta *= FORFEIT_MULT;
 
@@ -80,7 +82,10 @@ export function resolveWin(winnerElo, loserElo, popFactor, opts = {}) {
   // from the rounded values so what's shown ("+27") always equals the actual
   // change in the displayed rating.
   const loserLoss = Math.max(MIN_LOSS_DELTA, delta * LOSS_MULT);
-  const winnerAfter = Math.round(winnerElo + delta);
+  // Voluntary forfeit short-circuits the winner's gain to 0 — no farming
+  // by waiting people out. Loser's loss is untouched.
+  const winnerGain = voluntary ? 0 : delta;
+  const winnerAfter = Math.round(winnerElo + winnerGain);
   const loserAfter = Math.round(floor(loserElo - loserLoss));
 
   return {
