@@ -107,6 +107,11 @@ export default function App() {
   // Kitsune "opponent found" intermediary between queue and battle:
   // null | "in" (covering, slightly transparent) | "up" (blinds-lift away).
   const [foundOverlay, setFoundOverlay] = useState(null);
+  // Kitsune's speech bubble: "lockin" (within ~100 Elo), "goodluck" (you're
+  // ≥100 lower), "dontchoke" (you're ≥100 higher).
+  const [foundBubble, setFoundBubble] = useState(null);
+  // Bubble shows a beat AFTER kitsune lands (1s kitsune alone, then bubble).
+  const [bubbleVisible, setBubbleVisible] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [remaining, setRemaining] = useState(1);
   const [feedback, setFeedback] = useState(null);
@@ -214,6 +219,7 @@ export default function App() {
       setQueueFound(false);
       foundHoldRef.current = false;
       setFoundOverlay(null);
+      setFoundBubble(null);
     });
     socket.on("queueCancelled", () => setPhase(PHASE.LOBBY));
 
@@ -230,6 +236,20 @@ export default function App() {
       setHasRemote(false);
       setPeerAV({ cam: false, mic: false });
       ensurePeer(); // ready to negotiate if either side enables A/V
+      // Pick Kitsune's speech bubble based on the Elo gap. |diff| < 100 →
+      // similar (lock in); you're lower by ≥100 → good luck; higher by ≥100
+      // → don't choke. If we somehow have no opponent Elo, skip the bubble.
+      const haveOpp = Number.isFinite(opponent?.elo);
+      const diff = (you?.elo ?? 0) - (opponent?.elo ?? 0);
+      const bubble = !haveOpp
+        ? null
+        : diff <= -100
+        ? "goodluck"
+        : diff >= 100
+        ? "dontchoke"
+        : "lockin";
+      setFoundBubble(bubble);
+      setBubbleVisible(false);
       // 1) Same queue page: Mimiko swaps to the "wait" pose, held a beat.
       setQueueFound(true);
       foundHoldRef.current = true;
@@ -240,11 +260,22 @@ export default function App() {
         //    overlay covers it (slightly transparent)…
         setPhase(PHASE.PREPARE);
         setFoundOverlay("in");
-        setTimeout(() => {
-          // 3) …then lifts up like a window blind, revealing the battle.
-          setFoundOverlay("up");
-          setTimeout(() => setFoundOverlay(null), 500);
-        }, 2000);
+        // Timeline:
+        //   bubble case → kitsune alone 1s, bubble pops in, 1s with bubble,
+        //                 then lift (total 2s on screen before the blinds lift).
+        //   no bubble   → kitsune alone 1s, then lift.
+        if (bubble) {
+          setTimeout(() => setBubbleVisible(true), 1000);
+          setTimeout(() => {
+            setFoundOverlay("up");
+            setTimeout(() => setFoundOverlay(null), 500);
+          }, 2000);
+        } else {
+          setTimeout(() => {
+            setFoundOverlay("up");
+            setTimeout(() => setFoundOverlay(null), 500);
+          }, 1000);
+        }
       }, FOUND_HOLD_MS);
     });
 
@@ -1051,7 +1082,14 @@ export default function App() {
           aria-hidden="true"
         >
           <div className="found-figure">
-            <img src="/kitsune.png" alt="" />
+            <img className="found-kitsune" src="/kitsune.png" alt="" />
+            {foundBubble && bubbleVisible && (
+              <img
+                className="found-bubble"
+                src={`/bubble_${foundBubble}.png`}
+                alt=""
+              />
+            )}
           </div>
         </div>
       )}
