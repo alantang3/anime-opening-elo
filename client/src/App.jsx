@@ -1045,6 +1045,16 @@ export default function App() {
         </div>
       )}
 
+      {foundOverlay && (
+        <div
+          className={"found-overlay" + (foundOverlay === "up" ? " lift" : "")}
+          aria-hidden="true"
+        >
+          <div className="found-figure">
+            <img src="/kitsune.png" alt="" />
+          </div>
+        </div>
+      )}
 
       {panel === "profile" && (
         <div className="modal-backdrop" onClick={closePanel}>
@@ -1326,14 +1336,9 @@ export default function App() {
               />
               <img
                 className={"qm" + (queueFound ? " on" : "")}
-                src="/kitsune.png"
+                src="/mimikowait.png"
                 alt=""
               />
-              {queueFound && (
-                <span className="kitsune-elo">
-                  {opponent?.elo ?? "?"} ELO opponent found.
-                </span>
-              )}
             </div>
             {!queueFound && (
               <button
