@@ -156,7 +156,7 @@ const GHOST_PLAYERS = [
   { id: "ghost:17", nickname: "NovaBeat", elo: 2620, wins: 355, losses: 241 },
   { id: "ghost:18", nickname: "RoninLoop", elo: 2520, wins: 340, losses: 242 },
   { id: "ghost:19", nickname: "HikariWave", elo: 2420, wins: 326, losses: 242 },
-  { id: "ghost:20", nickname: "DubLordX", elo: 2320, wins: 312, losses: 243 },
+  { id: "ghost:20", nickname: "DubLordX", elo: 2300, wins: 312, losses: 243 },
 ];
 
 app.get("/api/leaderboard", (_req, res) => {

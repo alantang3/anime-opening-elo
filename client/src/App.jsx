@@ -56,15 +56,18 @@ const RANKS = [
   { min: 1200, name: "Chunin", color: "#14cf86" },
   { min: 1500, name: "Jonin", color: "#3ad63f" },
   { min: 1800, name: "Survey Corps Member", color: "#9ad81b" },
-  { min: 2100, name: "Pro Hero", color: "#e8b317" },
-  { min: 2400, name: "Hashira", color: "#f6851f" },
-  { min: 2700, name: "S-Class Hero", color: "#fb5a2e" },
-  { min: 3000, name: "Special Grade Sorcerer", color: "#f5356e" },
-  { min: 3300, name: "Kage", color: "#e62222" },
-  { min: 3600, name: "Pirate King", color: "#c026d6" },
-  { min: 3900, name: "The Honored One", color: "#6a5cff" },
-  { min: 4200, name: "Super Saiyan", color: "#ffd23d" },
-  { min: 4500, name: "Anime God", color: "#ffffff" },
+  // Titan Shifter slots between Survey Corps' lime-green and Pro Hero's
+  // gold — chartreuse continues the cool→warm gradient cleanly.
+  { min: 2100, name: "Titan Shifter", color: "#c1c619" },
+  { min: 2400, name: "Pro Hero", color: "#e8b317" },
+  { min: 2700, name: "Hashira", color: "#f6851f" },
+  { min: 3000, name: "S-Class Hero", color: "#fb5a2e" },
+  { min: 3300, name: "Special Grade Sorcerer", color: "#f5356e" },
+  { min: 3600, name: "Kage", color: "#e62222" },
+  { min: 3900, name: "Pirate King", color: "#c026d6" },
+  { min: 4200, name: "The Honored One", color: "#6a5cff" },
+  { min: 4500, name: "Super Saiyan", color: "#ffd23d" },
+  { min: 4800, name: "Anime God", color: "#ffffff" },
 ];
 function rankForElo(elo) {
   let r = RANKS[0];
