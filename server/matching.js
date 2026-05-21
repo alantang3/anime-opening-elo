@@ -13,6 +13,8 @@
 // normalization (no fuzzy/edit-distance): this is a competitive Elo game, so
 // we prefer broad alias coverage over typo tolerance.
 
+import { MANUAL_ALIASES } from "./manualAliases.js";
+
 // Lowercase, strip diacritics (Pokémon → pokemon), drop punctuation, collapse
 // whitespace. Unicode letters/numbers are kept, so Japanese (進撃の巨人) and
 // kana survive as a single comparable token.
@@ -106,12 +108,17 @@ function addOne(set, raw) {
   if (na !== n && na.length >= 2) addForm(set, na);
 }
 
-// Split a raw title at its first SUBTITLE delimiter — a colon (incl.
-// full-width) or a spaced dash. NOT an in-word hyphen, so "Kaguya-sama"
-// stays whole. Returns [franchiseRoot, subtitle], either possibly "".
+// Split a raw title at its first SUBTITLE delimiter:
+//   - colon (incl. full-width)
+//   - em/en dash with optional spaces
+//   - SPACED hyphen (not in-word, so "Kaguya-sama" stays whole)
+//   - one-or-more "!" / "?" followed by space ("Haikyuu!! Karasuno...",
+//     "Working!! Wagnaria…"). Without this, franchise names that end in
+//     emphatic punctuation never reduce to their root.
+// Returns [franchiseRoot, subtitle], either possibly "".
 function splitSubtitle(raw) {
   const s = String(raw || "");
-  const m = s.match(/\s*:\s*|\s*：\s*|\s*[—–]\s*|\s+-\s+/);
+  const m = s.match(/\s*:\s*|\s*：\s*|\s*[—–]\s*|\s+-\s+|!+\s+|\?+\s+/);
   if (!m) return ["", ""];
   return [s.slice(0, m.index).trim(), s.slice(m.index + m[0].length).trim()];
 }
@@ -153,12 +160,52 @@ export function buildAcceptedAnswers({
     Boolean
   );
   for (const name of all) addName(set, name);
+
+  // Manual alias overlay: shows whose famous handle / acronym can't be
+  // derived from any source title by the automatic rules (substrings
+  // with no delimiter, dropped genre prefixes, compound-word acronyms).
+  // See manualAliases.js for the full list and rationale.
+  const allNormalized = all.map(normalize);
+  for (const rule of MANUAL_ALIASES) {
+    if (allNormalized.some((n) => rule.matches.test(n))) {
+      for (const alias of rule.aliases) addOne(set, alias);
+    }
+  }
+
   set.delete("");
   return {
     accepted: [...set],
     franchiseKey:
       seriesSlug || stripMarkers(normalize(seriesName || athName)) || "?",
   };
+}
+
+/**
+ * Augment an existing accepted-set with additional title strings (e.g.
+ * AniList synonyms fetched after the opening was first pooled), running
+ * them through the same alias pipeline so they pick up marker stripping
+ * and acronym generation automatically. Also re-checks MANUAL_ALIASES
+ * against the new names in case any of them triggers a curated rule
+ * that wasn't satisfied by the original sources.
+ *
+ * Returns a NEW array; does not mutate the input.
+ *
+ * @param {string[]} acceptedArray  existing accepted entries
+ * @param {string[]} extraNames     additional raw titles
+ * @returns {string[]}
+ */
+export function extendAccepted(acceptedArray, extraNames) {
+  if (!extraNames?.length) return acceptedArray || [];
+  const set = new Set(acceptedArray || []);
+  for (const name of extraNames) addName(set, name);
+  const extraNormalized = extraNames.map(normalize);
+  for (const rule of MANUAL_ALIASES) {
+    if (extraNormalized.some((n) => rule.matches.test(n))) {
+      for (const alias of rule.aliases) addOne(set, alias);
+    }
+  }
+  set.delete("");
+  return [...set];
 }
 
 export function isCorrect(guessText, acceptedArray) {
@@ -175,5 +222,38 @@ export function isCorrect(guessText, acceptedArray) {
     ga,
     stripMarkers(ga),
   ];
-  return forms.some((f) => f && f.length >= 2 && set.has(f));
+  if (forms.some((f) => f && f.length >= 2 && set.has(f))) return true;
+  // Fallback: contiguous word-boundary substring of any accepted entry.
+  // Catches the "famous partial name" pattern that exact-match misses
+  // (Love is War inside "Kaguya-sama: Love is War — Ultra Romantic",
+  // Bunny Girl Senpai inside the full Seishun Buta Yarou title, Madoka
+  // Magica inside the full Puella Magi / Mahou Shoujo titles) without
+  // having to hand-list each show. See isSubstringMatch for the safety
+  // guards that stop "love" or "is war" from matching everything.
+  return isSubstringMatch(g, acceptedArray);
+}
+
+// Tier 2 of guess matching: a guess is allowed if it appears as a
+// CONTIGUOUS WORD-BOUNDARY SUBSTRING of any accepted title — but only
+// when the guess is substantive enough to be unambiguous.
+//
+// Safety guards (all required):
+//   - ≥ 2 words: single tokens go through the exact-match set only,
+//     so "love" or "anime" can't substring-match into everything.
+//   - ≥ 2 "substantive" (3+ char) words: filters fragments where the
+//     content is all stopwords plus one keyword ("is war", "no game",
+//     "the world"). The pair must carry enough identity on its own.
+//   - ≥ 8 total chars: kills tiny phrases like "go go", "ai ga".
+//   - Word-boundary padding (" guess " inside " name "): stops
+//     "love is war" from matching "love is warrior" or partial-word
+//     overlaps.
+function isSubstringMatch(g, acceptedArray) {
+  if (!g) return false;
+  const words = g.split(" ").filter(Boolean);
+  if (words.length < 2) return false;
+  const substantive = words.filter((w) => w.length >= 3).length;
+  if (substantive < 2) return false;
+  if (g.length < 8) return false;
+  const needle = " " + g + " ";
+  return acceptedArray.some((name) => (" " + name + " ").includes(needle));
 }

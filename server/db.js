@@ -103,6 +103,7 @@ function ensureColumn(table, column, type) {
   }
 }
 ensureColumn("mal_popularity", "titles", "TEXT");
+ensureColumn("mal_popularity", "anilist_titles", "TEXT");
 ensureColumn("players", "google_sub", "TEXT"); // Google account id (stable)
 ensureColumn("players", "avatar", "TEXT");
 ensureColumn("players", "avatar_is_custom", "INTEGER"); // user-uploaded pic
@@ -201,6 +202,19 @@ const stmt = {
     ON CONFLICT(mal_id) DO UPDATE SET
       members = @members, score = @score, title = @title,
       titles = @titles, fetched_at = @now
+  `),
+  // AniList titles cache lives in the SAME mal_popularity row, but is
+  // updated independently so a fresh AniList fetch doesn't reset the
+  // Jikan fetched_at (and vice versa). The empty-row case (AniList fetch
+  // arriving before any Jikan fetch for this id) creates a placeholder
+  // row carrying only anilist_titles + a sentinel fetched_at; a later
+  // Jikan call will populate the rest via upsertPop's ON CONFLICT.
+  getAnilist: db.prepare(`SELECT anilist_titles FROM mal_popularity WHERE mal_id = ?`),
+  upsertAnilist: db.prepare(`
+    INSERT INTO mal_popularity (mal_id, anilist_titles, fetched_at)
+    VALUES (@mal_id, @titles, @now)
+    ON CONFLICT(mal_id) DO UPDATE SET
+      anilist_titles = @titles
   `),
   getByGoogle: db.prepare(`SELECT * FROM players WHERE google_sub = ?`),
   insertGuest: db.prepare(`
@@ -463,6 +477,30 @@ export function leaderboard(limit = 20) {
 
 export function getCachedPopularity(malId) {
   return stmt.getPop.get(malId) || null;
+}
+
+// AniList titles cache, keyed by MAL id (we always know mal id, AniList's
+// own ID is derived). Returns the array if cached (even an empty cached
+// array — that's a "no AniList data" sentinel, distinct from null which
+// means "never fetched"). Cached forever; AniList data changes rarely
+// and is augmentative anyway.
+export function getCachedAnilistTitles(malId) {
+  const row = stmt.getAnilist.get(malId);
+  if (!row || row.anilist_titles == null) return null;
+  try {
+    const a = JSON.parse(row.anilist_titles);
+    return Array.isArray(a) ? a : [];
+  } catch {
+    return null;
+  }
+}
+
+export function cacheAnilistTitles(malId, titles) {
+  stmt.upsertAnilist.run({
+    mal_id: malId,
+    titles: JSON.stringify(titles || []),
+    now: new Date().toISOString(),
+  });
 }
 
 export function cachePopularity({ malId, members, score, title, titles }) {

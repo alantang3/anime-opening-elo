@@ -203,6 +203,12 @@ export default function App() {
   // once via [] effect) can read the CURRENT phase, not the stale closure
   // value from when they were registered.
   const phaseRef = useRef("auth");
+  // Last round number we've fully processed a `round:end` for. The server
+  // emits round:end with a 500ms ACK timeout and retries on misses (so a
+  // dropped packet doesn't wedge the client on the playing UI); when a
+  // retransmit arrives after we already advanced, this ref lets us skip
+  // it instead of bouncing back to RESULT. Reset on matchFound.
+  const lastRoundEndRef = useRef(0);
   // Result-page video retries: bounded high enough to walk every alternate
   // the server has (typically 5-20 URLs); the server returns null when its
   // alternate list is exhausted, which is the real termination signal. The
@@ -297,6 +303,11 @@ export default function App() {
       setOppStatus(null);
       setNotice(null);
       setHasRemote(false);
+      // Fresh match → fresh round-end dedupe state. round:end retransmits
+      // (server retries on missed ACK) compare data.round against this ref
+      // to skip duplicates; reset to 0 so round 1's emit is always
+      // processed.
+      lastRoundEndRef.current = 0;
       setPeerAV({ cam: false, mic: false });
       ensurePeer(); // ready to negotiate if either side enables A/V
       // Pick Kitsune's speech bubble based on the Elo gap. |diff| < 100 →
@@ -415,12 +426,29 @@ export default function App() {
     });
 
     // Server says "your guess fired but the round isn't live anymore on my
-    // side" — a round:end was lost in flight, leaving the UI wedged in a
-    // dead-battle state. Park the user on the RESULT screen as if the
-    // opponent left, so they always have actionable buttons (Find New
-    // Opponent / Home / etc.) and never get auto-transitioned somewhere
-    // they can't escape without a click.
+    // side." Two distinct causes; only ONE should trigger the dead-game
+    // recovery:
+    //
+    //   1) round:end was genuinely lost in flight, so we're wedged on the
+    //      playing UI without a real result. parkOnResultDeadGame is
+    //      correct here — it synthesizes a minimal "unplayable" result
+    //      so the user has actionable buttons.
+    //
+    //   2) round:end was received and processed normally (you won, you
+    //      lost, you forfeited — Elo is COMMITTED on the server) but a
+    //      stale/duplicate `guess` event hit the server AFTER the round
+    //      ended (fat-finger second Enter, autocomplete blur+Enter,
+    //      late retry). Server's handleGuess sees state≠"playing" and
+    //      fires this resync. If we ran parkOnResultDeadGame here, it
+    //      would clobber the real result with a synthetic youWon:false /
+    //      delta:0 record — the "won then it didn't count" bug. The
+    //      server's Elo is fine; the local result is what got wiped.
+    //
+    // Distinguish by phase: if we're already on RESULT, case (2) — the
+    // round is settled, ignore the stale resync. Otherwise case (1) —
+    // do the recovery.
     socket.on("match:resync", () => {
+      if (phaseRef.current === PHASE.RESULT) return;
       parkOnResultDeadGame("Round was lost in transit — pick where to go next.");
     });
 
@@ -440,7 +468,18 @@ export default function App() {
       setTimeout(() => setOppStatus(null), 2500);
     });
 
-    socket.on("round:end", (data) => {
+    socket.on("round:end", (data, ack) => {
+      // Always ACK first so the server stops retrying — even if we end
+      // up skipping the body below as a duplicate. socket.io's
+      // server-side .timeout(500).emit waits for this callback; without
+      // it the server fires retries that we'd waste cycles deduping.
+      try { ack?.(); } catch {}
+      // Dedupe retransmits: if we've already processed this round's
+      // end, the second/third arrival is a re-emit from the server's
+      // ACK-retry loop. Skip it; our state is already correct.
+      const r = data?.round ?? null;
+      if (r != null && r <= lastRoundEndRef.current) return;
+      if (r != null) lastRoundEndRef.current = r;
       stopTimer();
       setResult(data);
       setPhase(PHASE.RESULT);
@@ -520,13 +559,30 @@ export default function App() {
       teardownRTC();
       setVotes({ you: null, opponent: null });
       setOppGone(true);
-      setNotice(
+      const noticeMsg =
         reason === "opponent_declined"
           ? "Opponent wanted a new opponent."
           : reason === "rematch_timeout"
           ? "Rematch timed out."
-          : "Opponent left."
-      );
+          : "Opponent left.";
+      // Server-side, opponent:gone with "opponent_declined" only fires
+      // from onRematchVote, which requires state === "rematch" — i.e.
+      // beginRematch ran, which called emitRoundEnd FIRST. So in theory
+      // we should already be on PHASE.RESULT here. If we're NOT (a lost-
+      // in-flight round:end, a hidden-tab event-loop throttle, a slow
+      // network re-order) the user gets wedged: match-stage still up,
+      // music still playing (the video element keeps going), and a
+      // "Opponent wanted a new opponent" notice at the top with no
+      // clickable buttons because <ResultPanel> never mounted (it gates
+      // on phase === RESULT && result). Fall through to the same
+      // dead-game recovery the rest of the app uses for lost round:end
+      // — synthesize a minimal result, force phase to RESULT, so the
+      // user always lands on a screen with actionable buttons.
+      if (phaseRef.current !== PHASE.RESULT) {
+        parkOnResultDeadGame(noticeMsg);
+      } else {
+        setNotice(noticeMsg);
+      }
     });
     socket.on("match:over", ({ reason }) => {
       teardownRTC();
@@ -535,6 +591,113 @@ export default function App() {
       setPhase(PHASE.LOBBY);
       if (reason && reason !== "you_left")
         setNotice("Match ended.");
+    });
+
+    // Reconnect: server found us still living in an active match's
+    // member list (rebound the existing conn onto our new socket) and
+    // is telling us where to pick up. Restore enough state so the UI
+    // renders the right phase. The round HASN'T paused on the server,
+    // so for "playing" we compute playStartRef from the remaining time
+    // so the local timer ticks down to the right zero.
+    socket.on("match:resume", (data) => {
+      if (!data) return;
+      const {
+        state,
+        you,
+        opponent: opp,
+        round,
+        opening,
+        durationMs,
+        countdownRemainingMs,
+        playingRemainingMs,
+        roundEnd,
+        votes: resumeVotes,
+      } = data;
+      // Player + opponent badges.
+      if (you) setMe(you);
+      if (opp) setOpponent(opp);
+      // Skip the curtain entirely — the matchup screen / kitsune are
+      // first-time-only ceremonies, not appropriate for a resume.
+      setMatchStarting(false);
+      setCurtainParting(false);
+      // Clear any "Disconnected from server. Reconnecting…" notice that
+      // socket.on("disconnect") set when we lost connection.
+      setNotice(null);
+      // Reset per-round flags for live rounds.
+      setVotes({ you: null, opponent: null });
+      setOppGone(false);
+      setOppStatus(null);
+      setQuery("");
+      setNeedTap(false);
+      setAudioFailed(false);
+      unplayableSentRef.current = false;
+      altReqRef.current = false;
+      resultRetriesRef.current = 0;
+      if (opening) {
+        setRoundInfo({
+          round,
+          videoUrl: opening.videoUrl || null,
+          audioUrl: opening.audioUrl || null,
+          dub: opening.dub || null,
+          durationMs: durationMs || null,
+        });
+      }
+
+      if (state === "preparing") {
+        // Buffering screen; the server's report→beginCountdown will fire
+        // round:start naturally when the countdown begins.
+        setPhase(PHASE.PREPARE);
+        setResult(null);
+      } else if (state === "countdown") {
+        const remaining = Math.max(0, countdownRemainingMs ?? 0);
+        startCountdown(remaining, durationMs || 90000);
+        setResult(null);
+      } else if (state === "playing") {
+        // Two flavors of "resume into a live round":
+        //   (a) tab stayed open + wifi blipped — phaseRef is already
+        //       PLAYING, the <video> kept playing through it, audio is
+        //       already in sync with the opponent. Don't touch playback;
+        //       just re-anchor the local timer from the server's
+        //       authoritative remaining-ms in case the clock drifted.
+        //   (b) page reloaded — phaseRef is AUTH/LOBBY, video element
+        //       is fresh, no audio. Seek to elapsed and start playback.
+        // Either way, anchor playStartRef so the visual timer ticks
+        // down to the correct zero.
+        setResult(null);
+        durationRef.current = durationMs || 90000;
+        const elapsedMs = (durationMs || 0) - (playingRemainingMs || 0);
+        playStartRef.current = Date.now() - elapsedMs;
+        const audioWasLikelyStillPlaying = phaseRef.current === PHASE.PLAYING;
+        setPhase(PHASE.PLAYING);
+        if (!audioWasLikelyStillPlaying) {
+          // Fresh client — start the opening at the right timestamp.
+          // attemptPlay(startSec) sets v.currentTime = startSec; the
+          // browser queues the seek if metadata isn't loaded yet.
+          // 50ms delay lets the roundSrc effect remount the <video>
+          // first so videoRef.current points at the new node.
+          setTimeout(() => attemptPlay(elapsedMs / 1000), 50);
+          setTimeout(() => inputRef.current?.focus(), 100);
+        }
+        // Always re-anchor the tick to match the server's authoritative
+        // timing — a couple-frame visual jitter on the bar is fine and
+        // is much better than letting clock drift accumulate.
+        clearInterval(tickRef.current);
+        tickRef.current = setInterval(() => {
+          const d = durationRef.current || 90000;
+          const frac = 1 - (Date.now() - playStartRef.current) / d;
+          setRemaining(Math.max(0, frac));
+          if (frac <= 0) clearInterval(tickRef.current);
+        }, 100);
+      } else if (state === "result" || state === "rematch") {
+        // Round already ended while we were gone — drop straight onto
+        // the result screen with the cached payload. Mark this round
+        // as already-processed so a late round:end ACK retransmit
+        // (if any) doesn't re-run the handler over the resumed state.
+        if (roundEnd) setResult(roundEnd);
+        if (resumeVotes) setVotes(resumeVotes);
+        if (typeof round === "number") lastRoundEndRef.current = round;
+        setPhase(PHASE.RESULT);
+      }
     });
 
     socket.on("errorMsg", ({ message }) => setNotice(message));
@@ -813,11 +976,15 @@ export default function App() {
     }, 3000);
   }
 
-  function attemptPlay() {
+  function attemptPlay(startSec = 0) {
     const v = videoRef.current;
     if (!v) return;
     v.volume = volume;
-    v.currentTime = 0;
+    // currentTime can be set before metadata loads — the browser queues
+    // the seek and applies it once the source is ready. This lets a
+    // mid-round reconnect splice into the opening at the same timestamp
+    // the opponent is hearing, instead of restarting from 0.
+    v.currentTime = startSec;
     v.play().then(
       () => {
         setNeedTap(false);
@@ -1182,7 +1349,16 @@ export default function App() {
   // ---------- Actions ----------
   const goHome = () => {
     if (!me) return;
-    if (phase === PHASE.QUEUE) cancelQueue();
+    // QUEUE phase covers TWO server states: (a) actually waiting in the
+    // queue, and (b) the ~1.2s "found-hold" window after matchFound fires
+    // but before the phase transitions to PREPARE (mimiko's wait pose).
+    // In (b) the server already has us in a match (state="preparing"),
+    // so Home-click during this window is a FORFEIT, not a queue cancel —
+    // it costs Elo. queueFound flips true exactly for this window.
+    if (phase === PHASE.QUEUE) {
+      if (queueFound) leaveMatch();
+      else cancelQueue();
+    }
     else if (phase === PHASE.INVITING) cancelInvite();
     else if (inMatch) leaveMatch();
     setPhase(PHASE.LOBBY);

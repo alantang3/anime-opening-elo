@@ -472,6 +472,9 @@ function beginCountdown(match) {
   );
 
   match.state = "countdown";
+  // Track when countdown started so reconnect-resume can compute the
+  // remaining countdown for a player who comes back mid-3-2-1.
+  match.countdownStartedAt = Date.now();
   io.to(match.id).emit("round:start", {
     round: match.round,
     countdownMs: COUNTDOWN_MS,
@@ -648,8 +651,15 @@ function emitRoundEnd(match, perSocket) {
     song: match.opening.song?.title || null,
   };
   const pop = match.popularity || {};
+  // Cache last round-end payload keyed by player.id so reconnect-resume
+  // can hand the right one back to a returning player (socket.id changes
+  // across reconnects; player.id is stable).
+  match.lastResultByPlayer = match.lastResultByPlayer || {};
   for (const c of match.members) {
-    c.socket.emit("round:end", {
+    const payload = {
+      // Round number lets the client dedupe a retransmit — if it already
+      // processed this round's end, the second one is a no-op.
+      round: match.round,
       outcome: perSocket.outcome,
       voluntary: !!perSocket.voluntary,
       answer,
@@ -659,8 +669,130 @@ function emitRoundEnd(match, perSocket) {
         factor: pop.factor != null ? Math.round(pop.factor * 100) / 100 : null,
       },
       result: perSocket[c.socket.id],
-    });
+    };
+    if (c.player?.id) match.lastResultByPlayer[c.player.id] = payload;
+    if (c.isBot) {
+      // Bot's fake socket.emit is a noop; preserve the existing call so
+      // the loop shape is unchanged. No ACK to wait for.
+      c.socket.emit("round:end", payload);
+    } else if (c.disconnected) {
+      // Skip the ACK retry to a known-dead socket — the cached payload
+      // above will be sent via match:resume when they reconnect.
+      continue;
+    } else {
+      // CRITICAL EVENT: phase transition out of the live round. If this
+      // is lost in flight (transient network blip, transport upgrade,
+      // backgrounded tab), the client gets wedged on the playing UI
+      // while the rematch flow continues server-side. Use a 500ms ACK
+      // timeout and retry up to 2 more times (1.5s total) so a single
+      // dropped packet recovers without user-visible damage. The client
+      // dedupes on payload.round so a retransmit after the client has
+      // already processed the first one is harmless.
+      emitWithAckRetry(c.socket, "round:end", payload, 3);
+    }
   }
+}
+
+// Rebind a previously-disconnected conn (still living in match.members)
+// onto a new socket. Migrates per-socket-id state (vote, reported media
+// length) and resumes the client via "match:resume".
+function rebindAndResume(match, oldConn, newSocket) {
+  const oldSocketId = oldConn.socket?.id || null;
+  // The new socket already has its own placeholder conn in conns; drop it
+  // and point newSocket.id → the OLD conn so all subsequent socket events
+  // (guess, leaveMatch, etc.) hit the same conn that's in match.members.
+  conns.delete(newSocket.id);
+  conns.set(newSocket.id, oldConn);
+  oldConn.socket = newSocket;
+  oldConn.disconnected = false;
+  oldConn.disconnectedAt = null;
+  newSocket.join(match.id);
+
+  // Migrate socket-id-keyed maps to the new socket.id.
+  if (oldSocketId && match.rematchVotes.has(oldSocketId)) {
+    const v = match.rematchVotes.get(oldSocketId);
+    match.rematchVotes.delete(oldSocketId);
+    match.rematchVotes.set(newSocket.id, v);
+  }
+  if (oldSocketId && match.reported.has(oldSocketId)) {
+    const r = match.reported.get(oldSocketId);
+    match.reported.delete(oldSocketId);
+    match.reported.set(newSocket.id, r);
+  }
+
+  // Send authed + match:resume so the client knows who it is and what
+  // state to render. Existing socket handlers (guess, vote, etc.) work
+  // because newSocket.id now maps to the same conn. The opponent gets
+  // NO notification — from their side the game has been continuing
+  // normally; they don't need to know we ever left.
+  newSocket.emit("authed", { player: publicPlayer(oldConn.player) });
+  newSocket.emit("match:resume", buildResumePayload(match, oldConn));
+
+  // If the match was waiting on this player to come back before tearing
+  // down (e.g. opponent declined the rematch while we were gone), deliver
+  // the queued opponent:gone now.
+  if (match.pendingOpponentGone) {
+    const reason = match.pendingOpponentGone;
+    match.pendingOpponentGone = null;
+    parkAfterOpponentGone(match, reason, [oldConn]);
+  }
+}
+
+function buildResumePayload(match, you) {
+  const opponent = match.members.find((m) => m !== you);
+  const now = Date.now();
+  const countdownRemainingMs =
+    match.state === "countdown" && match.countdownStartedAt
+      ? Math.max(0, COUNTDOWN_MS - (now - match.countdownStartedAt))
+      : null;
+  const playingRemainingMs =
+    match.state === "playing" && match.startedAt && match.durationMs
+      ? Math.max(0, match.durationMs - (now - match.startedAt))
+      : null;
+  return {
+    state: match.state,
+    you: publicPlayer(you.player),
+    opponent: publicPlayer(opponent?.player),
+    round: match.round,
+    opening: match.opening
+      ? {
+          videoUrl: match.opening.video?.link || null,
+          audioUrl: match.opening.audioUrl || null,
+          dub: match.dub?.label || null,
+        }
+      : null,
+    durationMs: match.durationMs || null,
+    countdownRemainingMs,
+    playingRemainingMs,
+    // Result + votes for resumes during the post-round screens.
+    roundEnd:
+      (match.state === "result" || match.state === "rematch") &&
+      match.lastResultByPlayer
+        ? match.lastResultByPlayer[you.player.id] || null
+        : null,
+    votes:
+      match.state === "rematch"
+        ? {
+            you: match.rematchVotes.get(you.socket.id) ?? null,
+            opponent: opponent
+              ? match.rematchVotes.get(opponent.socket.id) ?? null
+              : null,
+          }
+        : null,
+  };
+}
+
+function emitWithAckRetry(socket, event, payload, attempts) {
+  const tryOnce = (left) => {
+    socket.timeout(500).emit(event, payload, (err) => {
+      // err is set when no ACK arrived within the timeout window.
+      // Retry until we've exhausted attempts; after that the client is
+      // most likely disconnected, and the disconnect handler will clean
+      // up the match independently.
+      if (err && left > 1) tryOnce(left - 1);
+    });
+  };
+  tryOnce(attempts);
 }
 
 // ---------- Rematch handshake ----------
@@ -790,7 +922,32 @@ function abortUnplayable(match) {
 // result screen: tear the match down once and leave each surviving human
 // idle but NOT requeued. The client keeps the revealed opening playable and
 // shows a "Find new opponent" button — they re-queue only when they choose.
+//
+// If a SURVIVOR is currently disconnected (e.g. they dropped wifi just as
+// the opponent declined / timed out), we DON'T tear down — the match
+// stays alive until they reconnect, at which point rebindAndResume
+// delivers the queued opponent:gone notice. Otherwise they'd reconnect
+// to a missing match and have no idea what happened.
 function parkAfterOpponentGone(match, reason, survivors) {
+  const waitingFor = survivors.find(
+    (c) => c && !c.isBot && c.disconnected
+  );
+  if (waitingFor) {
+    // Defer the teardown until the survivor reconnects — so they can
+    // actually see the opponent:gone notice when they come back. To
+    // avoid leaking a match if they never return, set a hard cap: after
+    // 2 minutes we give up and dissolve. Past that point the disconnected
+    // player will reconnect to an empty lobby and miss the notice.
+    match.pendingOpponentGone = reason;
+    clearTimeout(match.timers.deferredDissolve);
+    match.timers.deferredDissolve = setTimeout(() => {
+      if (!matches.has(match.id)) return;
+      clearTimers(match);
+      matches.delete(match.id);
+    }, 2 * 60 * 1000);
+    return;
+  }
+
   if (matches.has(match.id)) {
     clearTimers(match);
     matches.delete(match.id);
@@ -807,9 +964,22 @@ function parkAfterOpponentGone(match, reason, survivors) {
 // A disconnect AFTER the round actually started (state "playing") is a
 // forfeit — refresh/close-tab can't be a free escape from a losing round.
 // A disconnect DURING the 3-2-1 countdown (or while still preparing) is a
-// "genuine" disconnect: the round hadn't really started, so neither side
-// loses Elo. The boundary is the countdown timer expiring → state becomes
-// "playing".
+// Disconnect during a match. Rules:
+//
+//   - state "preparing" with NO opening yet: genuine "couldn't get the
+//     round set up" race window. Nobody has anything to forfeit from.
+//     Cancel cleanly, no Elo.
+//
+//   - state "result" / "rematch": round already settled, no Elo penalty.
+//     Survivor parked, leaver goes home.
+//
+//   - state "preparing"-with-opening / "countdown" / "playing": the round
+//     KEEPS RUNNING. The disconnected player is marked .disconnected and
+//     the match stays alive — they can reconnect anytime before the round
+//     ends. If the round naturally ends while they're gone (opponent
+//     guesses, timer expires), they get whatever result emerges. No
+//     grace timer, no forfeit-by-disconnect-timeout — just "show up
+//     before the round ends or eat the consequences."
 function handleDisconnectDuringMatch(match, goneConn) {
   const other = match.members.find((c) => c !== goneConn);
   if (!other) {
@@ -817,40 +987,42 @@ function handleDisconnectDuringMatch(match, goneConn) {
     return;
   }
 
-  if (match.state === "playing") {
-    match.disconnectForfeit = true;
-    // Funnel into the same path as the Forfeit button: disconnecter takes
-    // the Elo loss + LOSS in history; surviving player gets 0 Elo + NC
-    // (kills the rage-quit-to-farm meta). Once the round has started you
-    // are committed — exit-tab/refresh costs you exactly like Forfeit.
-    match.voluntary = true;
-    settleWin(match, other); // survivor wins this round and sees the result
-    parkAfterOpponentGone(match, "opponent_disconnected", [other]);
+  if (match.state === "preparing" && !match.opening) {
+    clearTimers(match);
+    matches.delete(match.id);
+    if (!other.isBot) {
+      other.socket.leave(match.id);
+      other.matchId = null;
+      other.status = "idle";
+      other.socket.emit("match:over", {
+        reason: "opponent_disconnected_pre_round",
+      });
+    }
     return;
   }
 
-  // Disconnect with a result already on screen (showing result / voting):
-  // keep the survivor on it, no Elo change, no auto-requeue.
   if (match.state === "result" || match.state === "rematch") {
     parkAfterOpponentGone(match, "opponent_left", [other]);
     return;
   }
 
-  // Pre-round disconnect (state "preparing" or "countdown"): GENUINE drop,
-  // no Elo for either side. Round hadn't really begun — punishing the
-  // surviving player here would be unfair. Drop the survivor to the lobby
-  // with a notice; they re-queue when ready.
-  clearTimers(match);
-  matches.delete(match.id);
-  other.socket.leave(match.id);
-  other.matchId = null;
-  other.status = "idle";
-  other.socket.emit("match:over", {
-    reason:
-      match.state === "countdown"
-        ? "opponent_disconnected_pre_round"
-        : "opponent_left",
-  });
+  // In-match disconnect (preparing-with-opening, countdown, playing).
+  // Mark them disconnected; the round continues exactly as before.
+  // The opponent gets NO notification — from their side the game just
+  // plays normally (their video keeps going, their input keeps working,
+  // the RTC peer just stops producing media without the UI flagging it).
+  // The disconnected player's job is to reconnect before the round ends;
+  // if they don't, they eat whatever result naturally emerges (opponent
+  // guess / timeout). No grace timer, no escape.
+  goneConn.disconnected = true;
+  goneConn.disconnectedAt = Date.now();
+
+  if (other.disconnected) {
+    // Both players are now gone. Nobody to receive results. Quietly
+    // dissolve; no Elo since nothing was actually decided.
+    clearTimers(match);
+    matches.delete(match.id);
+  }
 }
 
 // A voluntary mid-round forfeit (the "Forfeit"/leave button). Unlike a real
@@ -1022,6 +1194,23 @@ io.on("connection", (socket) => {
       return;
     }
     c.player = row;
+
+    // Reconnect: is this player a member of an active match with
+    // .disconnected=true? If so, rebind the existing conn (the one in
+    // match.members, carrying all the per-round state) to this new
+    // socket, then send "match:resume" so the client can rebuild the UI.
+    // No grace timer — the round has been ticking the whole time; if
+    // they reconnect before it ends they get to keep playing.
+    for (const m of matches.values()) {
+      const oldConn = m.members.find(
+        (mc) => mc.disconnected && mc.player?.id === row.id
+      );
+      if (oldConn) {
+        rebindAndResume(m, oldConn, socket);
+        return;
+      }
+    }
+
     socket.emit("authed", { player: publicPlayer(row) });
   });
 
@@ -1053,7 +1242,29 @@ io.on("connection", (socket) => {
     if (c.status === "idle") enqueue(socket.id);
   });
 
-  socket.on("cancelQueue", () => dequeue(socket.id));
+  socket.on("cancelQueue", () => {
+    const c = conns.get(socket.id);
+    // Safety net: if we're already in a match (the client may have raced
+    // matchFound vs. its own Home-click and sent cancelQueue from the
+    // found-hold window), treat it as a forfeit instead of a no-op
+    // dequeue. Without this, a player could escape Elo loss by clicking
+    // Home in the moment between matchFound and their UI transitioning
+    // to PREPARE. The client also sends leaveMatch directly in that
+    // window, but this catches any path that doesn't.
+    if (c?.matchId) {
+      const m = matches.get(c.matchId);
+      if (
+        m &&
+        (m.state === "preparing" ||
+          m.state === "countdown" ||
+          m.state === "playing")
+      ) {
+        voluntaryForfeit(m, c);
+        return;
+      }
+    }
+    dequeue(socket.id);
+  });
 
   // ---- Private friend match via invite link (ranked) ----
   socket.on("createInvite", () => {
@@ -1180,8 +1391,20 @@ io.on("connection", (socket) => {
     const c = conns.get(socket.id);
     const m = c?.matchId && matches.get(c.matchId);
     if (!m) return;
-    if (m.state === "playing" || m.state === "countdown") {
-      // Leaving mid-play forfeits the round — but, unlike a real disconnect,
+    // Forfeit applies in EVERY in-match phase, not just playing/countdown.
+    // Home-click during preparing (buffering the opening) is just as
+    // voluntary as during the 3-2-1 or mid-round — the "no Elo" carve-out
+    // is for real network disconnects only. voluntaryForfeit handles the
+    // tiny ms-race case where state==="preparing" before the opening is
+    // picked (cancels cleanly, no Elo because we can't compute it without
+    // round info) — that's fine, the user is leaving before there's
+    // anything to forfeit FROM.
+    if (
+      m.state === "playing" ||
+      m.state === "countdown" ||
+      m.state === "preparing"
+    ) {
+      // Leaving mid-match forfeits the round — but, unlike a real disconnect,
       // the match stays alive so both can still rematch each other.
       voluntaryForfeit(m, c);
     } else {

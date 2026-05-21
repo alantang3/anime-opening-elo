@@ -12,6 +12,7 @@ import {
 } from "./animethemes.js";
 import { getPopularityPage, membersToFactor } from "./popularity.js";
 import { buildAcceptedAnswers } from "./matching.js";
+import { getAnilistTitles } from "./anilist.js";
 import { dubFranchiseFor, isEnglishDub } from "./dubOverrides.js";
 import {
   upsertOpening,
@@ -45,13 +46,18 @@ async function ingestPopular(entry) {
   const res = await getAnimeOpenings(slug);
   if (!res || !res.themes.length) return 0; // no OPs *or* EDs catalogued — skip
   const detail = await getAnimeDetail(slug); // series/synonyms for matching
+  // AniList synonyms (fan handles like "AoT", "BNHA") — cached after
+  // first hit. The pool ingester paces itself with sleep(2000) between
+  // anime so adding one more API call here is well within AniList's
+  // 90/min unauth rate limit.
+  const anilistTitles = await getAnilistTitles(entry.malId);
 
   const { accepted, franchiseKey } = buildAcceptedAnswers({
     athName: res.anime.name,
     seriesName: detail?.seriesName,
     seriesSlug: detail?.seriesSlug,
     synonyms: detail?.synonyms || [],
-    jikanTitles: entry.titles || [],
+    jikanTitles: [...(entry.titles || []), ...anilistTitles],
   });
   const common = {
     animeId: Number(res.anime.id),

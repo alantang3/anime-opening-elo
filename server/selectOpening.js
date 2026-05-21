@@ -23,9 +23,10 @@ import {
   targetFactorForElo,
   minMembersForElo,
 } from "./popularity.js";
-import { buildAcceptedAnswers } from "./matching.js";
+import { buildAcceptedAnswers, extendAccepted } from "./matching.js";
 import { dubFranchiseFor, isEnglishDub } from "./dubOverrides.js";
 import { pickPooledOpening, poolSize } from "./db.js";
+import { getAnilistTitles } from "./anilist.js";
 
 // Once the pool has at least this many rows, rounds are served entirely from
 // it (zero API calls). Below it (cold start) we fall back to live fetching.
@@ -65,12 +66,16 @@ async function evaluate(c) {
 // Attach the franchise-level accepted-answer set + resolve the audio
 // (Japanese by default; English dub for Pokémon / Digimon Adventure).
 async function enrich(e, target, chosenFactor) {
+  // AniList synonyms in parallel with everything else for a richer
+  // accepted-set. Cheap (cached after first hit) and never blocks the
+  // round on failure — getAnilistTitles returns [] on any error.
+  const anilistTitles = await getAnilistTitles(e.malId);
   const { accepted, franchiseKey } = buildAcceptedAnswers({
     athName: e.anime?.name,
     seriesName: e.detail?.seriesName,
     seriesSlug: e.detail?.seriesSlug,
     synonyms: e.detail?.synonyms || [],
-    jikanTitles: e.popularity?.titles || [],
+    jikanTitles: [...(e.popularity?.titles || []), ...anilistTitles],
   });
   const resolved = await resolveVideo(e);
   const dub = resolved.dub;
@@ -116,6 +121,14 @@ export async function pickOpeningForElo(avgElo) {
     if (row) {
       recent.push(row.animeId);
       if (recent.length > 40) recent.shift();
+      // Augment with AniList synonyms (cached after first fetch). This
+      // is what makes AniList work for ALREADY-pooled openings — the
+      // ingester only attaches AniList for NEW ingestions, so without
+      // this, existing rows would keep their pre-AniList accepted set
+      // until they happen to be re-ingested. Caching makes this nearly
+      // free after the first lookup per malId.
+      const anilistTitles = await getAnilistTitles(row.malId);
+      const accepted = extendAccepted(row.accepted || [], anilistTitles);
       return {
         anime: {
           id: row.animeId,
@@ -133,7 +146,7 @@ export async function pickOpeningForElo(avgElo) {
           score: row.score,
           factor: row.factor,
         },
-        accepted: row.accepted || [],
+        accepted,
         franchiseKey: row.franchiseKey,
         franchise: row.franchise,
         dub: row.dubLabel ? { label: row.dubLabel } : null,
