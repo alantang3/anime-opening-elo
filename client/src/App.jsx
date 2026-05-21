@@ -132,7 +132,6 @@ export default function App() {
   const [bubbleVisible, setBubbleVisible] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [remaining, setRemaining] = useState(1);
-  const [feedback, setFeedback] = useState(null);
   const [needTap, setNeedTap] = useState(false); // autoplay was blocked
   const [oppStatus, setOppStatus] = useState(null);
   const [result, setResult] = useState(null);
@@ -295,7 +294,6 @@ export default function App() {
       setResult(null);
       setVotes({ you: null, opponent: null });
       setOppGone(false);
-      setFeedback(null);
       setOppStatus(null);
       setNotice(null);
       setHasRemote(false);
@@ -366,7 +364,6 @@ export default function App() {
       setResult(null);
       setVotes({ you: null, opponent: null });
       setOppGone(false);
-      setFeedback(null);
       setOppStatus(null);
       setQuery("");
       setNeedTap(false);
@@ -429,10 +426,10 @@ export default function App() {
 
     socket.on("guess:result", ({ correct }) => {
       if (!correct) {
-        setFeedback("Not it — keep guessing!");
+        // Yui's translucent overlay flash IS the "wrong" signal — no text
+        // feedback needed. Re-select the input so the player can retype
+        // immediately.
         setTimeout(() => inputRef.current?.select(), 30);
-        // Yui flashes onto the screen as a translucent overlay for 0.5s,
-        // then fades back into the game (no blinds-up like Kitsune).
         clearTimeout(yuiTimer.current);
         setYuiVisible(true);
         yuiTimer.current = setTimeout(() => setYuiVisible(false), 750);
@@ -2034,7 +2031,6 @@ export default function App() {
                   <div style={{ width: `${remaining * 100}%` }} />
                 </div>
                 {oppStatus && <div className="opp-status">{oppStatus}</div>}
-                {feedback && <div className="feedback">{feedback}</div>}
                 <div className="input-row">
                   <input
                     ref={inputRef}
@@ -2150,25 +2146,30 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
 
   return (
     <div className={"result " + cls}>
-      <h3>
-        {result.outcome === "unplayable"
-          ? "Opening wouldn't play — round skipped"
-          : result.outcome === "timeout"
-          ? "Time's up — nobody got it"
-          : result.outcome === "forfeit"
-          ? won
-            ? "Opponent forfeited — no contest"
-            : "You forfeited"
-          : result.outcome === "disconnect"
-          ? won
-            ? "Opponent disconnected — you win"
-            : "You disconnected"
-          : won
-          ? "You got it first!"
-          : "Opponent got it first"}
-      </h3>
       <div className="result-body">
+        {/* h3 lives INSIDE result-info (not above result-body) so the
+            right column (Yuzu/Kuro) starts at the top of the result box
+            — only the .result padding separates her head from the box's
+            top edge. The h3 then sits above the anime name in the left
+            column, naturally lowering the anime name to make room. */}
         <div className="result-info">
+          <h3>
+            {result.outcome === "unplayable"
+              ? "Opening wouldn't play — round skipped"
+              : result.outcome === "timeout"
+              ? "Time's up — nobody got it"
+              : result.outcome === "forfeit"
+              ? won
+                ? "Opponent forfeited — no contest"
+                : "You forfeited"
+              : result.outcome === "disconnect"
+              ? won
+                ? "Opponent disconnected — you win"
+                : "You disconnected"
+              : won
+              ? "You got it first!"
+              : "Opponent got it first"}
+          </h3>
           <div className="answer">
             {result.answer?.name}
             {result.answer?.year && (

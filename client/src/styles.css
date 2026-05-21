@@ -351,11 +351,11 @@ button.danger:hover:not(:disabled) {
    covering the result-info text or her body. */
 .result-yuzu-bubble {
   position: absolute;
-  /* Top edge of the bubble aligned with the top of the character's hair
-     (= top of the wrap, where the contain-fit image begins). No overhang
-     above the wrap, so the result panel doesn't need extra vertical space
-     for the bubble; it just lives beside the head/hair in the gutter. */
-  top: 0;
+  /* Slight overhang above the wrap (top: -8px) — the bubble peeks up just
+     a touch above the character's hair so it reads as "above" her, not
+     "beside" her. The overhang sits inside .result's 16px top padding,
+     so it never escapes the result box. */
+  top: -8px;
   /* Right edge fully outside the wrap (at the wrap's left edge). Bubble
      body in the gutter; clean gap to the character. */
   right: 100%;
@@ -371,7 +371,7 @@ button.danger:hover:not(:disabled) {
 @media (max-width: 720px) {
   .result-yuzu-wrap { width: 96px; margin-right: 8px; }
   .result-yuzu { max-height: 110px; }
-  .result-yuzu-bubble { top: 0; right: 100%; width: 78%; max-height: 48%; }
+  .result-yuzu-bubble { top: -6px; right: 100%; width: 78%; max-height: 48%; }
 }
 
 .history {
@@ -514,14 +514,6 @@ button.danger:hover:not(:disabled) {
   margin-bottom: 10px;
   text-align: center;
 }
-.feedback {
-  color: var(--danger);
-  font-size: 14px;
-  margin-bottom: 10px;
-  text-align: center;
-  font-weight: 600;
-}
-
 .rematch {
   margin-top: 16px;
   padding-top: 16px;
@@ -999,21 +991,50 @@ button.danger:hover:not(:disabled) {
   border-radius: 16px;
   overflow: hidden;
 }
-/* Curtain card slots sit at the EXACT position of the battle player card
-   on each side. They hold the PlayerBadge and don't animate — they stay
-   put while the pads slide outward, so the curtain visually "becomes"
-   the battle card. Width matches .stage-side's flex-basis (132 / 92 px). */
+/* Curtain layout: each HALF is a flex row of [pad | card-slot | pad].
+   Both pads start the same width so the card-slot is centered in the half
+   during the hold. On parting, the pads animate flex-basis → 0 (same
+   rate), and the flex layout redistributes the freed space — visually the
+   card "slides" toward its battle position while the pads disappear into
+   the card's flanks. The curtain itself never goes off-screen; it just
+   collapses its padding so what remains IS the card. */
 .curtain {
   --battle-card-w: 132px;
+  display: flex;
 }
 @media (max-width: 620px) {
   .curtain { --battle-card-w: 92px; }
 }
+
+.curtain-half {
+  flex: 0 0 50%;
+  display: flex;
+  overflow: hidden;
+}
+/* OPP half: pack to the right so when the pads collapse the card-slot
+   lands at the half's RIGHT edge (= OPPONENT's battle position). LEFT
+   half stays default flex-start so the card lands at the half's LEFT
+   edge (= YOU's battle position). */
+.curtain-half-r { justify-content: flex-end; }
+
+.curtain-pad {
+  flex-grow: 0;
+  flex-shrink: 0;
+  /* Initial basis: half the leftover room after the card-slot. Both pads
+     identical → card centered in half. */
+  flex-basis: calc((100% - var(--battle-card-w)) / 2);
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--rank, var(--accent)) 38%, #0a0810),
+    color-mix(in srgb, var(--rank, var(--accent)) 8%, #0a0810)
+  );
+  /* Animates with the .parting class added on the parent .curtain. */
+  transition: flex-basis 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s;
+}
+.curtain.parting .curtain-pad { flex-basis: 0; }
+
 .curtain-card-slot {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: var(--battle-card-w);
+  flex: 0 0 var(--battle-card-w);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1026,57 +1047,13 @@ button.danger:hover:not(:disabled) {
   box-shadow:
     inset 0 0 60px -20px color-mix(in srgb, var(--rank, var(--accent)) 70%, transparent);
 }
-.curtain-card-left  { left: 0; }
-.curtain-card-right { right: 0; }
 
-/* Pads fill the rest of each curtain half (between the card slot and the
-   curtain's center seam). Same rank gradient as the card-slot on that
-   side → seamless, no band between them. */
-.curtain-pad {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  background: linear-gradient(
-    160deg,
-    color-mix(in srgb, var(--rank, var(--accent)) 38%, #0a0810),
-    color-mix(in srgb, var(--rank, var(--accent)) 8%, #0a0810)
-  );
-}
-.curtain-pad-left {
-  left: var(--battle-card-w);  /* starts at YOU's card right edge */
-  right: 50%;                  /* ends at the curtain's center seam */
-}
-.curtain-pad-right {
-  left: 50%;
-  right: var(--battle-card-w); /* ends at OPPONENT's card left edge */
-}
-
-/* PlayerBadge inside the curtain card slot shouldn't paint its own card
-   visual — the slot already IS the card. Strip border / shadow / bg so
-   the content (rank bar, avatar, name, Elo) sits flush on the slot's
-   gradient with no visible "band" around it. */
+/* Strip the PlayerBadge's own .vs-card visual when inside the curtain so
+   the content sits flush on the seamless gradient — no band around it. */
 .curtain .vs-card {
   border: none;
   background: transparent;
   box-shadow: none;
-}
-
-/* Parting animation: pads slide outward to off-screen left/right. Card
-   slots stay put. Delay 0.8 s so the curtain holds the matchup briefly
-   before the pads start sliding. Total animation = CURTAIN_TOTAL_MS (1.6s). */
-.curtain.parting .curtain-pad-left {
-  animation: padOutL 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.8s forwards;
-}
-.curtain.parting .curtain-pad-right {
-  animation: padOutR 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.8s forwards;
-}
-@keyframes padOutL {
-  0%   { transform: translateX(0); }
-  100% { transform: translateX(-100%); }
-}
-@keyframes padOutR {
-  0%   { transform: translateX(0); }
-  100% { transform: translateX(100%); }
 }
 .curtain-eyebrow {
   color: var(--muted);
