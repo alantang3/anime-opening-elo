@@ -104,8 +104,19 @@ export default function App() {
   // The round plays the AUDIO file (reliable); flips to the video on audio
   // failure. RESULT always shows the video for the reveal.
   const [audioFailed, setAudioFailed] = useState(false);
-  // Brief curtain-reveal animation when a match is found.
-  const [matchStarting, setMatchStarting] = useState(false);
+  // Curtain reveal when a match is found. Two states because the curtain
+  // is mounted EARLY (so kitsune's transparency reveals the curtain, not
+  // the battle stage underneath) but the parting animation only fires AFTER
+  // kitsune is gone.
+  const [matchStarting, setMatchStarting] = useState(false); // curtain mounted
+  const [curtainParting, setCurtainParting] = useState(false); // animate part
+  // Mirror matchStarting into a ref so socket listeners (registered once)
+  // can see the current value without stale closure. Also a pending-event
+  // buffer: if round:start arrives while the curtain is still up, we
+  // queue it and dispatch only after the curtain finishes — so the 3-2-1
+  // countdown doesn't actually begin until the curtain is out of the way.
+  const matchStartingRef = useRef(false);
+  const pendingRoundStartRef = useRef(null);
   // Queue screen (one page, image swaps): mimiko → mimikosleep after 5s →
   // mimikowait when matched (held a beat so it registers, then the match).
   const [queueSleep, setQueueSleep] = useState(false);
@@ -310,22 +321,28 @@ export default function App() {
       clearTimeout(matchStartTimer.current);
       matchStartTimer.current = setTimeout(() => {
         foundHoldRef.current = false;
-        // 2) Battle UI mounts underneath; the Kitsune "opponent found"
-        //    overlay covers it (slightly transparent)…
+        // 2) Phase moves to PREPARE → battle UI mounts UNDERNEATH the
+        //    curtain. We turn the curtain on RIGHT NOW (before kitsune
+        //    fades in), so kitsune's translucent overlay reveals the
+        //    rank-tinted curtain panels instead of the bare battle stage.
+        //    The curtain stays mounted, NOT parting, through the entire
+        //    kitsune phase + curtain hold.
         setPhase(PHASE.PREPARE);
+        setMatchStarting(true);
+        setCurtainParting(false);
         setFoundOverlay("in");
-        // Timeline:
-        //   bubble case → kitsune alone 1s, bubble pops in, 1s with bubble,
-        //                 then lift (total 2s on screen before the blinds lift).
-        //   no bubble   → kitsune alone 1s, then lift.
-        // After Kitsune fully leaves, the matchup curtain drops in. Holds
-        // for ~1.5s showing both players' cards, then parts to reveal the
-        // battle. Total curtain time is bounded by the CSS animation (kept
-        // in sync with CURTAIN_TOTAL_MS).
-        const showCurtainAfter = (kitsuneTotalMs) => {
+        // Kitsune timing + when to trigger the curtain part:
+        //   bubble    → 2.5s total kitsune  → then part
+        //   no bubble → 1.5s total kitsune  → then part
+        // After kitsune leaves, CURTAIN_TOTAL_MS controls the full
+        // matchup-hold + slide animation, then unmount.
+        const kickCurtainPart = (kitsuneTotalMs) => {
           setTimeout(() => {
-            setMatchStarting(true);
-            setTimeout(() => setMatchStarting(false), CURTAIN_TOTAL_MS);
+            setCurtainParting(true);
+            setTimeout(() => {
+              setMatchStarting(false);
+              setCurtainParting(false);
+            }, CURTAIN_TOTAL_MS);
           }, kitsuneTotalMs);
         };
         if (bubble) {
@@ -334,13 +351,13 @@ export default function App() {
             setFoundOverlay("up");
             setTimeout(() => setFoundOverlay(null), 500);
           }, 2000);
-          showCurtainAfter(2500); // kitsune in (2000ms) + lift (500ms)
+          kickCurtainPart(2500); // kitsune in (2000ms) + lift (500ms)
         } else {
           setTimeout(() => {
             setFoundOverlay("up");
             setTimeout(() => setFoundOverlay(null), 500);
           }, 1000);
-          showCurtainAfter(1500); // kitsune in (1000ms) + lift (500ms)
+          kickCurtainPart(1500);
         }
       }, FOUND_HOLD_MS);
     });
@@ -371,18 +388,14 @@ export default function App() {
     });
 
     socket.on("round:start", ({ countdownMs, durationMs }) => {
-      durationRef.current = durationMs;
-      setPhase(PHASE.COUNTDOWN);
-      let n = Math.ceil(countdownMs / 1000);
-      setCountdown(n);
-      const iv = setInterval(() => {
-        n -= 1;
-        setCountdown(n);
-        if (n <= 0) {
-          clearInterval(iv);
-          beginPlaying();
-        }
-      }, 1000);
+      // If the curtain is still up, hold this event — countdown should
+      // not begin until the curtain has fully cleared. The matchStarting
+      // effect above drains the pending buffer when curtain unmounts.
+      if (matchStartingRef.current) {
+        pendingRoundStartRef.current = { countdownMs, durationMs };
+        return;
+      }
+      startCountdown(countdownMs, durationMs);
     });
 
     // Server's answer to round:videoFailed — swap to the next version/encode,
@@ -592,6 +605,18 @@ export default function App() {
 
   // Keep phaseRef in sync so socket listeners can see the current phase.
   useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  // Keep matchStartingRef in sync. When the curtain finishes (matchStarting
+  // flips false), drain any queued round:start so the countdown begins
+  // RIGHT THEN — never while the curtain is still up.
+  useEffect(() => {
+    matchStartingRef.current = matchStarting;
+    if (!matchStarting && pendingRoundStartRef.current) {
+      const data = pendingRoundStartRef.current;
+      pendingRoundStartRef.current = null;
+      startCountdown(data.countdownMs, data.durationMs);
+    }
+  }, [matchStarting]);
 
   // Returning to the home page wipes any lingering notice (opponent left,
   // rematch expired, "trying another…", upload errors, etc). The lobby
@@ -812,6 +837,25 @@ export default function App() {
   }
 
   // ---------- Timer (visual only; server is authoritative) ----------
+  // Kick off the 3-2-1 countdown, then transition to PLAYING. Extracted
+  // from the round:start socket handler so we can also drain a queued
+  // start after the curtain finishes (round:start arrived during the
+  // curtain → held → fired here when the curtain is gone).
+  function startCountdown(countdownMs, durationMs) {
+    durationRef.current = durationMs;
+    setPhase(PHASE.COUNTDOWN);
+    let n = Math.ceil(countdownMs / 1000);
+    setCountdown(n);
+    const iv = setInterval(() => {
+      n -= 1;
+      setCountdown(n);
+      if (n <= 0) {
+        clearInterval(iv);
+        beginPlaying();
+      }
+    }, 1000);
+  }
+
   function beginPlaying() {
     setPhase(PHASE.PLAYING);
     playStartRef.current = Date.now();
@@ -1802,7 +1846,7 @@ export default function App() {
         {inMatch && (
           <>
             <div
-              className={"match-stage" + (matchStarting ? " is-opening" : "")}
+              className={"match-stage" + (curtainParting ? " is-opening" : "")}
             >
               <aside className="stage-side stage-left">
                 <PlayerBadge p={me} label="YOU" />
@@ -1898,15 +1942,26 @@ export default function App() {
               </aside>
 
               {matchStarting && (
-                <div className="curtain" aria-hidden="true">
-                  {/* The curtain panels reuse the same PlayerBadge that lives
-                      on the battle stage — same rank color, same pfp, same
-                      Elo — so the matchup looks identical before/after the
-                      curtain parts. */}
-                  <div className="curtain-panel curtain-left">
+                <div
+                  className={"curtain" + (curtainParting ? " parting" : "")}
+                  aria-hidden="true"
+                >
+                  {/* Each curtain panel is essentially a WIDER version of
+                      the in-battle .vs-card: same rank-tinted gradient
+                      background extending across the half-screen, with the
+                      PlayerBadge centered inside. The padding to either
+                      side of the badge IS the rank color — no random
+                      purple. */}
+                  <div
+                    className="curtain-panel curtain-left"
+                    style={{ "--rank": rankForElo(me?.elo).color }}
+                  >
                     <PlayerBadge p={me} label="YOU" />
                   </div>
-                  <div className="curtain-panel curtain-right">
+                  <div
+                    className="curtain-panel curtain-right"
+                    style={{ "--rank": rankForElo(opponent?.elo).color }}
+                  >
                     <PlayerBadge p={opponent} label="OPPONENT" />
                   </div>
                 </div>

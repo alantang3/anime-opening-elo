@@ -347,14 +347,13 @@ button.danger:hover:not(:disabled) {
    covering the result-info text or her body. */
 .result-yuzu-bubble {
   position: absolute;
-  /* Bubble's bottom edge ≈ her mouth level. Tail tip lands near her face
-     with a clean gap — no bubble pixels touching the character, so any
-     coloring/anti-alias artifacts stay invisible across all dialogues. */
-  top: -28%;
-  /* Right edge FULLY OUTSIDE the wrap (right: 100% = at wrap's left
-     edge). Bubble body in the gutter, tail tip just past the wrap edge.
-     Yuzu/Kuro have ~25-30 px of transparent margin before their body,
-     so this puts a comfortable gap between the tail and her skin. */
+  /* Top edge of the bubble aligned with the top of the character's hair
+     (= top of the wrap, where the contain-fit image begins). No overhang
+     above the wrap, so the result panel doesn't need extra vertical space
+     for the bubble; it just lives beside the head/hair in the gutter. */
+  top: 0;
+  /* Right edge fully outside the wrap (at the wrap's left edge). Bubble
+     body in the gutter; clean gap to the character. */
   right: 100%;
   width: 72%;
   max-height: 50%;
@@ -368,7 +367,7 @@ button.danger:hover:not(:disabled) {
 @media (max-width: 720px) {
   .result-yuzu-wrap { width: 96px; margin-right: 8px; }
   .result-yuzu { max-height: 130px; }
-  .result-yuzu-bubble { top: -22%; right: 100%; width: 78%; max-height: 48%; }
+  .result-yuzu-bubble { top: 0; right: 100%; width: 78%; max-height: 48%; }
 }
 
 .history {
@@ -996,6 +995,11 @@ button.danger:hover:not(:disabled) {
   border-radius: 16px;
   overflow: hidden;
 }
+/* Each panel is the player's RANK-TINTED gradient (same recipe as .vs-card)
+   stretched across half the curtain — so the panel reads as a wider
+   version of the in-battle card. The PlayerBadge sits centered inside as
+   the actual "card", and the extra width on either side IS the card's
+   own background extended outward. */
 .curtain-panel {
   flex: 1;
   display: flex;
@@ -1004,28 +1008,35 @@ button.danger:hover:not(:disabled) {
   justify-content: center;
   gap: 10px;
   background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--accent) 22%, var(--panel)),
-    var(--panel)
+    160deg,
+    color-mix(in srgb, var(--rank, var(--accent)) 38%, #0a0810),
+    color-mix(in srgb, var(--rank, var(--accent)) 8%, #0a0810)
   );
+  box-shadow:
+    inset 0 0 60px -20px color-mix(in srgb, var(--rank, var(--accent)) 70%, transparent);
 }
-/* Curtain dwell: ~0.8s holding (PlayerBadges readable but brief), then
-   ~0.8s parting. Total matches CURTAIN_TOTAL_MS (1.6s). */
 .curtain-left {
-  border-right: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  animation: curtainPartL 1.55s cubic-bezier(0.76, 0, 0.24, 1) forwards;
+  border-right: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 55%, transparent);
 }
 .curtain-right {
-  border-left: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  animation: curtainPartR 1.55s cubic-bezier(0.76, 0, 0.24, 1) forwards;
+  border-left: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 55%, transparent);
 }
-@keyframes curtainPartL {
-  /* Hold 0–50% (~0.78s), then slide 50–100% (~0.78s). */
-  0%, 50% { transform: translateX(0); }
+/* Parting animation: hold 0.8s, slide outward 0.8s. Only runs when the
+   parent .curtain has the `.parting` class — so the curtain stays put
+   during the kitsune phase (when matchStarting is true but parting is
+   not yet triggered). */
+.curtain.parting .curtain-left {
+  animation: curtainSlideL 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.8s forwards;
+}
+.curtain.parting .curtain-right {
+  animation: curtainSlideR 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.8s forwards;
+}
+@keyframes curtainSlideL {
+  0% { transform: translateX(0); }
   100% { transform: translateX(-101%); }
 }
-@keyframes curtainPartR {
-  0%, 50% { transform: translateX(0); }
+@keyframes curtainSlideR {
+  0% { transform: translateX(0); }
   100% { transform: translateX(101%); }
 }
 .curtain-eyebrow {
@@ -1515,23 +1526,25 @@ button.danger:hover:not(:disabled) {
 }
 .found-overlay.lift { transform: translateY(-100%); }
 
-/* Midori lives in the LEFT GUTTER between the viewport's left edge and
-   the .app card (max-width 880px, centered). She's positioned at the
-   horizontal CENTER of that gutter — equal distance from the screen edge
-   and from the card's left outline. Width scales with the gutter so she
-   fills the available space proportionally without crowding either side.
-   position: fixed pins her vertical center to the viewport. */
+/* Midori lives in the LEFT GUTTER (between viewport edge and the .app
+   card, max-width 880px). Positioned VERTICALLY around the upper-middle
+   of the viewport where the battle square actually sits — not at viewport
+   center, which lands her down near the leaderboard. Width tied directly
+   to the gutter size with a guaranteed 40 px gap on each side, so she
+   never touches the card or spills off-screen at any viewport width. */
 .side-midori {
   position: fixed;
-  top: 50%;
-  /* Center of the left gutter = (100vw − 880px) / 4 from the viewport's
-     left. translate(-50%, -50%) puts Midori's own center on that point. */
+  /* Vertically aligned with where the battle stage typically lives in
+     the upper half of the viewport (not the dead center). On a 1080
+     viewport this lands around y≈300, comfortably within the battle area
+     and well above the leaderboard. */
+  top: clamp(180px, 28vh, 360px);
+  /* Center of the left gutter horizontally. */
   left: calc((100vw - 880px) / 4);
   transform: translate(-50%, -50%);
-  /* Width scales as ~70% of the half-gutter so the spacing on both sides
-     of her (to screen edge and to card) is comfortable, clamped to keep
-     her visible-but-not-overwhelming across viewport sizes. */
-  width: clamp(180px, calc((100vw - 880px) * 0.35), 320px);
+  /* Width is the gutter's available space MINUS 40 px on each side
+     (= 80 px total margin), clamped sensibly. Guarantees no touching. */
+  width: clamp(110px, calc((100vw - 880px) / 2 - 80px), 200px);
   height: auto;
   pointer-events: none;
   user-select: none;
@@ -1541,9 +1554,9 @@ button.danger:hover:not(:disabled) {
     drop-shadow(0 0 22px rgba(74, 222, 128, 0.2));
   animation: midoriFadeIn 0.6s ease-out both;
 }
-/* Below this viewport width the gutter is too narrow to hold her at her
-   minimum size without crashing into the card. */
-@media (max-width: 1300px) {
+/* Below this width the gutter can't hold her even at min size with a
+   reasonable margin from the card. */
+@media (max-width: 1220px) {
   .side-midori { display: none; }
 }
 @keyframes midoriFadeIn {
@@ -1611,9 +1624,11 @@ button.danger:hover:not(:disabled) {
    variant fires. */
 .found-bubble {
   position: absolute;
-  top: -2%;
-  /* Bubble's right edge ≈ 30% from canvas left. Kitsune's left side is
-     ~38%+, so ~8% gap = real breathing room. */
+  /* Bubble's TOP edge aligned with the top of Kitsune's hair — no
+     floating-above-her-head awkwardness. Kitsune's hair starts at ~8%
+     of the canvas height in the composited sprite. */
+  top: 8%;
+  /* Right edge ≈ 30% from canvas left, ~8% gap to her left cheek. */
   right: 70%;
   width: 26%;
   height: auto;
