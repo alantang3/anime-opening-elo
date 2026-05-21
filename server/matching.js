@@ -76,6 +76,32 @@ const hasLatin = (s) =>
   /[a-z]/i.test(s) &&
   !/\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}/u.test(s);
 
+// Digit ↔ word conversion so "7 Deadly Sins" matches "Seven Deadly
+// Sins" and vice versa. Anime titles use both interchangeably: official
+// English may be "Seven Deadly Sins" while fans type "7 deadly sins"
+// (or the title itself is "Re:Zero" written as "Re 0"). Covered up to
+// 12 — that's where the long tail of season/sequel numbers lives.
+const NUM_TO_WORD = {
+  "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+  "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
+  "10": "ten", "11": "eleven", "12": "twelve",
+};
+const WORD_TO_NUM = Object.fromEntries(
+  Object.entries(NUM_TO_WORD).map(([d, w]) => [w, d])
+);
+const WORD_NUMS_RE = new RegExp(
+  `\\b(${Object.keys(WORD_TO_NUM).join("|")})\\b`,
+  "g"
+);
+// \b\d+\b avoids matching "2nd" / "3rd" embedded in compound tokens;
+// stripMarkers handles those separately. Pure standalone digits only.
+function digitsToWords(s) {
+  return s.replace(/\b\d+\b/g, (m) => NUM_TO_WORD[m] || m);
+}
+function wordsToDigits(s) {
+  return s.replace(WORD_NUMS_RE, (m) => WORD_TO_NUM[m] || m);
+}
+
 // First letter of every word, particles included, because that's how fans
 // actually abbreviate: Shingeki no Kyojin → snk, Attack on Titan → aot,
 // Kimetsu no Yaiba → kny, Boku no Hero Academia → bnha.
@@ -95,6 +121,17 @@ function addForm(set, n) {
   if (n.length >= 2) set.add(n);
   const b = stripMarkers(n);
   if (b.length >= 2) set.add(b);
+  // Digit/word swaps on both — so "Seven Deadly Sins" also lands as
+  // "7 deadly sins" (and vice versa), and the franchise-base variants
+  // get the same treatment. Cheap: only adds when the swap actually
+  // changed something.
+  for (const base of [n, b]) {
+    if (!base) continue;
+    const w = digitsToWords(base);
+    if (w !== base && w.length >= 2) set.add(w);
+    const d = wordsToDigits(base);
+    if (d !== base && d.length >= 2) set.add(d);
+  }
   // Acronym from BOTH the full name and the franchise base, so a season
   // title ("Attack on Titan Season 3") still yields the franchise acronym
   // "aot", not just "aots3".
