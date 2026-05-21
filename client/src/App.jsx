@@ -407,15 +407,27 @@ export default function App() {
     });
 
     // Server's answer to round:videoFailed — swap to the next version/encode,
-    // or (url == null) we're out of alternates → scrap the round.
-    socket.on("round:altVideo", ({ url }) => {
+    // or (url == null) we're out of alternates → scrap the round. The
+    // server now also ships the alternate encode's paired audio URL when
+    // AnimeThemes has one — try that direct audio file FIRST (lighter,
+    // faster), falling back to the video file of the same encode if the
+    // audio also fails. Reset audioFailed so the audio-first preference
+    // kicks in for each new alternate, not just the primary.
+    socket.on("round:altVideo", ({ url, audioUrl }) => {
       altReqRef.current = false;
       clearTimeout(altReqTimeoutRef.current);
       if (url) {
         setNotice(null);
         setNeedTap(false);
-        setAudioFailed(true); // alternates are video links
-        setRoundInfo((prev) => (prev ? { ...prev, videoUrl: url } : prev));
+        // If the new encode has a paired audio file, take audio-first;
+        // otherwise immediately mark audio as failed so roundSrc picks
+        // the video URL.
+        setAudioFailed(!audioUrl);
+        setRoundInfo((prev) =>
+          prev
+            ? { ...prev, videoUrl: url, audioUrl: audioUrl || null }
+            : prev
+        );
       } else if (phaseRef.current !== PHASE.RESULT) {
         // Live round and we're out of alternates → void the round.
         reportUnplayable(lastFailReasonRef.current || "unplayable");

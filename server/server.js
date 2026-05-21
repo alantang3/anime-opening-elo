@@ -30,7 +30,7 @@ import {
   getPlayerStats,
   DATA_DIR,
 } from "./db.js";
-import { searchAnime, getThemeVideoLinks } from "./animethemes.js";
+import { searchAnime, getThemeMediaLinks } from "./animethemes.js";
 import { isCorrect } from "./matching.js";
 import { pickOpeningForElo } from "./selectOpening.js";
 import { startIngester } from "./pool.js";
@@ -1332,10 +1332,13 @@ io.on("connection", (socket) => {
     if (m) abortUnplayable(m);
   });
 
-  // A video link wouldn't play here — hand back the next version/encode of
-  // the same OP. Alternates are fetched from AnimeThemes once per round
-  // (lazily, only on a failure) and cached on the match. The client escalates
-  // to roundUnplayable when we run out (url: null).
+  // A video link wouldn't play here — hand back the next encode of the
+  // SAME OP slot, plus its paired audio file when AnimeThemes has one.
+  // Alternates are fetched once per round (lazily, only on a failure) and
+  // cached on the match. The client escalates to roundUnplayable when we
+  // run out (url: null). Each alternate carries both video + audio so the
+  // client can try the lighter audio file before the full video for that
+  // encoding, same audio-first preference as the primary.
   socket.on("round:videoFailed", async ({ url } = {}) => {
     const c = conns.get(socket.id);
     const m = c?.matchId && matches.get(c.matchId);
@@ -1345,9 +1348,10 @@ io.on("connection", (socket) => {
     // since the round is already settled.
     if (!["preparing", "countdown", "playing", "result"].includes(m.state)) return;
     const slug = m.opening?.anime?.slug;
-    if (!slug) return socket.emit("round:altVideo", { url: null });
+    if (!slug)
+      return socket.emit("round:altVideo", { url: null, audioUrl: null });
     if (!m.altLinksP)
-      m.altLinksP = getThemeVideoLinks(slug, m.opening?.theme?.slug);
+      m.altLinksP = getThemeMediaLinks(slug, m.opening?.theme?.slug);
     let links = [];
     try {
       links = (await m.altLinksP) || [];
@@ -1355,9 +1359,16 @@ io.on("connection", (socket) => {
       links = [];
     }
     if (!matches.has(m.id)) return; // round/match ended while fetching
-    const i = links.indexOf(url);
-    const next = i >= 0 ? links[i + 1] : links.find((l) => l && l !== url);
-    socket.emit("round:altVideo", { url: next || null });
+    // Find the failed entry by video link (what the client reported), then
+    // advance one. Falls back to "anything but the failed video" if the
+    // client reported an unknown URL (alt-video URL the cache doesn't list).
+    const i = links.findIndex((x) => x.video === url);
+    const next =
+      i >= 0 ? links[i + 1] : links.find((x) => x.video && x.video !== url);
+    socket.emit("round:altVideo", {
+      url: next?.video || null,
+      audioUrl: next?.audio || null,
+    });
   });
 
   socket.on("guess", ({ animeId, guessText } = {}) => {
