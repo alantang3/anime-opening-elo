@@ -995,9 +995,12 @@ button.danger:hover:not(:disabled) {
    Both pads start the same width so the card-slot is centered in the half
    during the hold. On parting, the pads animate flex-basis → 0 (same
    rate), and the flex layout redistributes the freed space — visually the
-   card "slides" toward its battle position while the pads disappear into
-   the card's flanks. The curtain itself never goes off-screen; it just
-   collapses its padding so what remains IS the card. */
+   card "slides" toward its battle position. At the end, .curtain-card-slot
+   is at the EXACT same x/y/width as .stage-side underneath, AND the
+   .vs-card inside it is the SAME .vs-card the battle uses (full border +
+   gradient + shadow — no stripping), so on unmount there is zero visual
+   change. The slot and pads paint nothing themselves; the card paints
+   itself, the pads paint the backdrop the card sits on. */
 .curtain {
   --battle-card-w: 132px;
   display: flex;
@@ -1017,6 +1020,10 @@ button.danger:hover:not(:disabled) {
    edge (= YOU's battle position). */
 .curtain-half-r { justify-content: flex-end; }
 
+/* Rank-tinted backdrop the card sits ON. The card has its own border /
+   gradient / shadow, so there is NO expectation of a seamless transition
+   between pad and card — they're deliberately distinct layers. Slightly
+   dimmer than the card so the card reads as foreground. */
 .curtain-pad {
   flex-grow: 0;
   flex-shrink: 0;
@@ -1025,71 +1032,35 @@ button.danger:hover:not(:disabled) {
   flex-basis: calc((100% - var(--battle-card-w)) / 2);
   background: linear-gradient(
     160deg,
-    color-mix(in srgb, var(--rank, var(--accent)) 38%, #0a0810),
-    color-mix(in srgb, var(--rank, var(--accent)) 8%, #0a0810)
+    color-mix(in srgb, var(--rank, var(--accent)) 26%, #0a0810),
+    color-mix(in srgb, var(--rank, var(--accent)) 6%, #0a0810)
   );
   /* Animates with the .parting class added on the parent .curtain. */
   transition: flex-basis 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s;
 }
 .curtain.parting .curtain-pad { flex-basis: 0; }
 
+/* Structural container only — paints nothing. The .vs-card inside paints
+   itself. Width + display mirror .stage-side so the card inside is
+   dimensionally identical to the battle card it lands on. */
 .curtain-card-slot {
   flex: 0 0 var(--battle-card-w);
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(
-    160deg,
-    color-mix(in srgb, var(--rank, var(--accent)) 38%, #0a0810),
-    color-mix(in srgb, var(--rank, var(--accent)) 8%, #0a0810)
-  );
-  box-shadow:
-    inset 0 0 60px -20px color-mix(in srgb, var(--rank, var(--accent)) 70%, transparent);
 }
-
-/* Strip the PlayerBadge's own .vs-card visual when inside the curtain so
-   the content sits flush on the seamless gradient — no band around it. */
-.curtain .vs-card {
-  border: none;
-  background: transparent;
-  box-shadow: none;
-}
-.curtain-eyebrow {
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0.18em;
-}
-.curtain-ava {
-  width: 72px;
-  height: 72px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 28px;
-  font-weight: 700;
-  color: #fff;
-  background: var(--accent);
-  overflow: hidden;
-}
-.curtain-ava img {
+/* Match .stage-side .vs-card exactly so the curtain card and the battle
+   card are visually indistinguishable at handoff (no jump on unmount). */
+.curtain-card-slot .vs-card {
+  flex: 1;
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  justify-content: center;
+  padding-bottom: 12px;
 }
-.curtain-name {
-  font-weight: 800;
-  font-size: 17px;
-}
-
 @media (max-width: 620px) {
   .match-stage { gap: 7px; }
   .stage-side { flex-basis: 92px; }
   .stage-side .vs-rankname { font-size: 12px; }
   .stage-side .vs-ava-wrap { width: 40px; height: 40px; }
   .stage-side .vs-card .vs-name { font-size: 12px; }
-  .curtain-ava { width: 52px; height: 52px; font-size: 20px; }
 }
 
 /* ---------- Lobby identity / avatar editor ---------- */
