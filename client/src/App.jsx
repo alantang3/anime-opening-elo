@@ -1946,23 +1946,35 @@ export default function App() {
                   className={"curtain" + (curtainParting ? " parting" : "")}
                   aria-hidden="true"
                 >
-                  {/* Each curtain panel is essentially a WIDER version of
-                      the in-battle .vs-card: same rank-tinted gradient
-                      background extending across the half-screen, with the
-                      PlayerBadge centered inside. The padding to either
-                      side of the badge IS the rank color — no random
-                      purple. */}
+                  {/* Each half is built as [outer-pad | card-slot | inner-pad]
+                      with both pads the same width (so the card is centered
+                      in the half during the hold). All three share the rank-
+                      tinted gradient → seamless, no band around the card.
+                      On parting: BOTH pads shrink flex-basis to 0 at the
+                      same rate. Flex layout redistributes the freed space,
+                      so the card visually slides toward its battle position
+                      (left edge of half for YOU, right edge for OPPONENT).
+                      The curtain stays mounted/visible; it just collapses
+                      its padding so what remains IS the player card. */}
                   <div
-                    className="curtain-panel curtain-left"
+                    className="curtain-half curtain-half-l"
                     style={{ "--rank": rankForElo(me?.elo).color }}
                   >
-                    <PlayerBadge p={me} label="YOU" />
+                    <div className="curtain-pad" />
+                    <div className="curtain-card-slot">
+                      <PlayerBadge p={me} label="YOU" />
+                    </div>
+                    <div className="curtain-pad" />
                   </div>
                   <div
-                    className="curtain-panel curtain-right"
+                    className="curtain-half curtain-half-r"
                     style={{ "--rank": rankForElo(opponent?.elo).color }}
                   >
-                    <PlayerBadge p={opponent} label="OPPONENT" />
+                    <div className="curtain-pad" />
+                    <div className="curtain-card-slot">
+                      <PlayerBadge p={opponent} label="OPPONENT" />
+                    </div>
+                    <div className="curtain-pad" />
                   </div>
                 </div>
               )}

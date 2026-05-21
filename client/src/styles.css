@@ -331,7 +331,11 @@ button.danger:hover:not(:disabled) {
   display: block;
   width: 100%;
   height: auto;
-  max-height: 180px;
+  /* Shorter now that the speech bubble is fully inside the wrap (no above-
+     wrap overhang) — the result panel is sized by this height, so dropping
+     it shrinks the panel while still leaving small gaps to the bubble and
+     character. */
+  max-height: 150px;
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
@@ -366,7 +370,7 @@ button.danger:hover:not(:disabled) {
 }
 @media (max-width: 720px) {
   .result-yuzu-wrap { width: 96px; margin-right: 8px; }
-  .result-yuzu { max-height: 130px; }
+  .result-yuzu { max-height: 110px; }
   .result-yuzu-bubble { top: 0; right: 100%; width: 78%; max-height: 48%; }
 }
 
@@ -995,18 +999,25 @@ button.danger:hover:not(:disabled) {
   border-radius: 16px;
   overflow: hidden;
 }
-/* Each panel is the player's RANK-TINTED gradient (same recipe as .vs-card)
-   stretched across half the curtain — so the panel reads as a wider
-   version of the in-battle card. The PlayerBadge sits centered inside as
-   the actual "card", and the extra width on either side IS the card's
-   own background extended outward. */
-.curtain-panel {
-  flex: 1;
+/* Curtain card slots sit at the EXACT position of the battle player card
+   on each side. They hold the PlayerBadge and don't animate — they stay
+   put while the pads slide outward, so the curtain visually "becomes"
+   the battle card. Width matches .stage-side's flex-basis (132 / 92 px). */
+.curtain {
+  --battle-card-w: 132px;
+}
+@media (max-width: 620px) {
+  .curtain { --battle-card-w: 92px; }
+}
+.curtain-card-slot {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--battle-card-w);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
   background: linear-gradient(
     160deg,
     color-mix(in srgb, var(--rank, var(--accent)) 38%, #0a0810),
@@ -1015,29 +1026,57 @@ button.danger:hover:not(:disabled) {
   box-shadow:
     inset 0 0 60px -20px color-mix(in srgb, var(--rank, var(--accent)) 70%, transparent);
 }
-.curtain-left {
-  border-right: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 55%, transparent);
+.curtain-card-left  { left: 0; }
+.curtain-card-right { right: 0; }
+
+/* Pads fill the rest of each curtain half (between the card slot and the
+   curtain's center seam). Same rank gradient as the card-slot on that
+   side → seamless, no band between them. */
+.curtain-pad {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--rank, var(--accent)) 38%, #0a0810),
+    color-mix(in srgb, var(--rank, var(--accent)) 8%, #0a0810)
+  );
 }
-.curtain-right {
-  border-left: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 55%, transparent);
+.curtain-pad-left {
+  left: var(--battle-card-w);  /* starts at YOU's card right edge */
+  right: 50%;                  /* ends at the curtain's center seam */
 }
-/* Parting animation: hold 0.8s, slide outward 0.8s. Only runs when the
-   parent .curtain has the `.parting` class — so the curtain stays put
-   during the kitsune phase (when matchStarting is true but parting is
-   not yet triggered). */
-.curtain.parting .curtain-left {
-  animation: curtainSlideL 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.8s forwards;
+.curtain-pad-right {
+  left: 50%;
+  right: var(--battle-card-w); /* ends at OPPONENT's card left edge */
 }
-.curtain.parting .curtain-right {
-  animation: curtainSlideR 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.8s forwards;
+
+/* PlayerBadge inside the curtain card slot shouldn't paint its own card
+   visual — the slot already IS the card. Strip border / shadow / bg so
+   the content (rank bar, avatar, name, Elo) sits flush on the slot's
+   gradient with no visible "band" around it. */
+.curtain .vs-card {
+  border: none;
+  background: transparent;
+  box-shadow: none;
 }
-@keyframes curtainSlideL {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(-101%); }
+
+/* Parting animation: pads slide outward to off-screen left/right. Card
+   slots stay put. Delay 0.8 s so the curtain holds the matchup briefly
+   before the pads start sliding. Total animation = CURTAIN_TOTAL_MS (1.6s). */
+.curtain.parting .curtain-pad-left {
+  animation: padOutL 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.8s forwards;
 }
-@keyframes curtainSlideR {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(101%); }
+.curtain.parting .curtain-pad-right {
+  animation: padOutR 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.8s forwards;
+}
+@keyframes padOutL {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+@keyframes padOutR {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(100%); }
 }
 .curtain-eyebrow {
   color: var(--muted);
