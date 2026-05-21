@@ -1386,6 +1386,19 @@ export default function App() {
         </div>
       )}
 
+      {/* Midori floats in the LEFT GUTTER outside the .app card — cheering
+          from the side. position: fixed so the battle stage layout is
+          unaffected; CSS hides her on narrow viewports where there's no
+          gutter space (would otherwise overlap the card). */}
+      {midoriShown && phase === PHASE.PLAYING && (
+        <img
+          className="side-midori"
+          src="/midori.png"
+          alt=""
+          aria-hidden="true"
+        />
+      )}
+
       {guestOpen && (
         <div className="modal-backdrop" onClick={() => !guestBusy && setGuestOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>

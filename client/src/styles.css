@@ -316,17 +316,15 @@ button.danger:hover:not(:disabled) {
 /* Wrap so the bubble can be absolutely positioned relative to Yuzu and
    doesn't escape the result card's padding. margin-right pulls her off the
    panel's right edge a bit. */
-/* Reserve dedicated empty space at the top of the wrap so the speech
-   bubble lives in its own real estate — same trick that lets Kitsune's
-   bubble sit in an empty corner of her canvas without touching her. Yuzu
-   herself (and Kuro) stay the same size; the wrap just gets taller so the
-   bubble sits ABOVE the character with a clean gap. */
+/* Yuzu / Kuro sit in this wrap on the right side of the result panel.
+   No padding reserved above — the speech bubble lives BESIDE her head,
+   not in a column above her, so no empty vertical space when there's
+   no bubble. */
 .result-yuzu-wrap {
   position: relative;
   flex-shrink: 0;
   margin-right: 12px;
   width: 140px;
-  padding-top: 96px;
   align-self: flex-start;
 }
 .result-yuzu {
@@ -339,15 +337,27 @@ button.danger:hover:not(:disabled) {
   -webkit-user-drag: none;
   filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.35));
 }
-/* Bubble fills the top padding area; never touches Yuzu/Kuro. The slight
-   negative right offset lets the tail (which points down-right toward the
-   character) land just above her head. */
+/* Bubble sits to the LEFT of her, with its TAIL aiming at her head/face.
+   The bubble PNG has its tail at the bottom-right of the sprite, so to
+   land the tail tip near her mouth (~25% from top of the wrap), the
+   bubble's bottom edge needs to sit at her mouth level — which means
+   the bubble extends a bit ABOVE the wrap. That overhang sits in the
+   result-panel space above the wrap (empty area below the h3), not on
+   top of her. Sized small so it fits cleanly in the gutter without
+   covering the result-info text or her body. */
 .result-yuzu-bubble {
   position: absolute;
-  top: 0;
-  right: -6%;
-  width: 100%;
-  max-height: 86px;
+  /* Bubble's bottom edge ≈ her mouth level. Tail tip lands near her face
+     with a clean gap — no bubble pixels touching the character, so any
+     coloring/anti-alias artifacts stay invisible across all dialogues. */
+  top: -28%;
+  /* Right edge FULLY OUTSIDE the wrap (right: 100% = at wrap's left
+     edge). Bubble body in the gutter, tail tip just past the wrap edge.
+     Yuzu/Kuro have ~25-30 px of transparent margin before their body,
+     so this puts a comfortable gap between the tail and her skin. */
+  right: 100%;
+  width: 72%;
+  max-height: 50%;
   height: auto;
   object-fit: contain;
   pointer-events: none;
@@ -356,9 +366,9 @@ button.danger:hover:not(:disabled) {
   filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3));
 }
 @media (max-width: 720px) {
-  .result-yuzu-wrap { width: 96px; margin-right: 8px; padding-top: 70px; }
+  .result-yuzu-wrap { width: 96px; margin-right: 8px; }
   .result-yuzu { max-height: 130px; }
-  .result-yuzu-bubble { right: -4%; max-height: 64px; }
+  .result-yuzu-bubble { top: -22%; right: 100%; width: 78%; max-height: 48%; }
 }
 
 .history {
@@ -841,31 +851,46 @@ button.danger:hover:not(:disabled) {
 }
 .vs-rankbar {
   width: 100%;
-  /* Tighter top padding pushes YOU / OPPONENT right up to the top edge.
-     min-height keeps the rankbar at its ORIGINAL overall height — the
-     divider line stays put and the avatar / username / Elo positions
-     below are unchanged. justify-content: space-between distributes the
-     eyebrow to the top and the rank name to the bottom (just above the
-     divider) within that fixed-height block. */
+  /* Eyebrow (YOU / OPPONENT) pinned to the top of the card; below it,
+     enough room for a 3-line rank name (the longest possible — e.g.
+     "Survey Corps Member") centered vertically and horizontally. The
+     min-height reserves this space so the bottom section (avatar /
+     username / Elo) lands at the SAME y-position regardless of how
+     many words the player's rank has. */
   padding: 3px 8px 6px;
-  min-height: 52px;
+  min-height: 70px;
   background: transparent;
   border-bottom: 1px solid rgba(255, 255, 255, 0.15);
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: space-between;
 }
 .vs-eyebrow {
   color: rgba(255, 255, 255, 0.78);
   font-size: 10px;
   letter-spacing: 0.16em;
+  /* First flex item → sits at the top (no gap above). */
+  flex-shrink: 0;
 }
 .vs-rankname {
   color: var(--rank, var(--accent));
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 800;
   letter-spacing: 0.01em;
+  /* One word per row, all centered. 1 word → centered in the block.
+     2 words → middle two rows of the block. 3 words → middle word
+     dead in the center. word-spacing: 9999px forces every space to
+     break to a new line; line-height tightens the stack. */
+  text-align: center;
+  word-spacing: 9999px;
+  line-height: 1.15;
+  /* Take all remaining vertical space below the eyebrow and center the
+     words within it (vertically + horizontally). */
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   text-shadow: 0 0 16px color-mix(in srgb, var(--rank, var(--accent)) 75%, transparent),
     0 1px 3px rgba(0, 0, 0, 0.7);
 }
@@ -1490,29 +1515,36 @@ button.danger:hover:not(:disabled) {
 }
 .found-overlay.lift { transform: translateY(-100%); }
 
-/* Midori as the "30 seconds in, lock in" mascot at the top of the battle
-   screen — fades in once and stays until round end. Sized to fit the
-   ambient gap above the battle stage WITHOUT pushing the stage down;
-   that means constraining by HEIGHT (her sprite is portrait, so a fixed
-   width would still spill far below the natural gap). Small top/bottom
-   padding so she doesn't kiss the card edge or the stage line. */
-.battle-midori {
-  display: flex;
-  justify-content: center;
-  padding: 6px 0 8px;
-  margin: 0;
+/* Midori lives in the LEFT GUTTER between the viewport's left edge and
+   the .app card (max-width 880px, centered). She's positioned at the
+   horizontal CENTER of that gutter — equal distance from the screen edge
+   and from the card's left outline. Width scales with the gutter so she
+   fills the available space proportionally without crowding either side.
+   position: fixed pins her vertical center to the viewport. */
+.side-midori {
+  position: fixed;
+  top: 50%;
+  /* Center of the left gutter = (100vw − 880px) / 4 from the viewport's
+     left. translate(-50%, -50%) puts Midori's own center on that point. */
+  left: calc((100vw - 880px) / 4);
+  transform: translate(-50%, -50%);
+  /* Width scales as ~70% of the half-gutter so the spacing on both sides
+     of her (to screen edge and to card) is comfortable, clamped to keep
+     her visible-but-not-overwhelming across viewport sizes. */
+  width: clamp(180px, calc((100vw - 880px) * 0.35), 320px);
+  height: auto;
   pointer-events: none;
-  animation: midoriFadeIn 0.6s ease-out both;
-}
-.battle-midori img {
-  display: block;
-  height: clamp(88px, 13vh, 140px);
-  width: auto;
-  object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
-  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.32))
-    drop-shadow(0 0 18px rgba(74, 222, 128, 0.18));
+  z-index: 30;
+  filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.4))
+    drop-shadow(0 0 22px rgba(74, 222, 128, 0.2));
+  animation: midoriFadeIn 0.6s ease-out both;
+}
+/* Below this viewport width the gutter is too narrow to hold her at her
+   minimum size without crashing into the card. */
+@media (max-width: 1300px) {
+  .side-midori { display: none; }
 }
 @keyframes midoriFadeIn {
   0%   { opacity: 0; transform: translateY(-6px); }
@@ -1570,10 +1602,19 @@ button.danger:hover:not(:disabled) {
    upper-right spot on the Kitsune card. Position picked so the bubble lands
    where the source variants drew it; width fixed so all three render the
    same size regardless of their individual trimmed bbox. */
+/* Bubble sits in the empty space to Kitsune's LEFT (her mouth angle
+   reads more naturally that way). The new bubble PNGs have their tail
+   at the bottom-right of the sprite, so positioning the bubble's right
+   edge to the LEFT of her cheek puts the tail pointing in at her face
+   with a clean gap — no pixels of the bubble touching her body, so any
+   color/anti-alias seams stay invisible regardless of which dialogue
+   variant fires. */
 .found-bubble {
   position: absolute;
-  top: 6%;
-  right: 4%;
+  top: -2%;
+  /* Bubble's right edge ≈ 30% from canvas left. Kitsune's left side is
+     ~38%+, so ~8% gap = real breathing room. */
+  right: 70%;
   width: 26%;
   height: auto;
   pointer-events: none;
