@@ -821,26 +821,21 @@ button.danger:hover:not(:disabled) {
   padding: 0 0 16px;
   overflow: hidden;
   border-radius: var(--radius);
-  /* The rank colour fills the whole rectangle as an AURA over a deep base:
-     a radial bloom + inner edge glow + outer halo. Dark enough that even the
-     pale tiers (Super Saiyan / Anime God) read as a bright glow, not a
-     washed-out card — uniform with the other ranks. */
-  background:
-    radial-gradient(
-      130% 90% at 50% 0%,
-      color-mix(in srgb, var(--rank, var(--accent)) 42%, transparent),
-      transparent 72%
-    ),
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--rank, var(--accent)) 18%, var(--panel)),
-      color-mix(in srgb, var(--rank, var(--accent)) 8%, #0a0810)
-    );
+  /* Width-independent painting only. The card is the SAME element that
+     stretches to 50% during the curtain hold and shrinks to 132px at
+     battle width, so the gradient + border + shadow must all look
+     identical at any width. Linear (180deg) depends on height only;
+     a 1px border is pixel-sized; the drop shadow is pixel-sized.
+     No radial gradient (would bloom different at different widths) and
+     no inset glow (would compress against the inner edges as the card
+     shrinks) — those produced the "different glow mid-animation" effect. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--rank, var(--accent)) 18%, var(--panel)),
+    color-mix(in srgb, var(--rank, var(--accent)) 8%, #0a0810)
+  );
   border: 1px solid color-mix(in srgb, var(--rank, var(--accent)) 72%, transparent);
-  box-shadow:
-    0 0 34px -6px color-mix(in srgb, var(--rank, var(--accent)) 70%, transparent),
-    inset 0 0 46px -14px color-mix(in srgb, var(--rank, var(--accent)) 80%, transparent),
-    0 18px 40px -28px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 18px 40px -28px rgba(0, 0, 0, 0.9);
   color: #fff;
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
 }
@@ -955,105 +950,63 @@ button.danger:hover:not(:disabled) {
   min-height: 1em;
 }
 
-/* Reveal: cards slide in from the edges, the square scales up. */
-/* Side cards stay hidden until the curtain starts parting (~0.8s delay),
-   then slide in over ~0.7s — synced to the curtain split. */
-.match-stage.is-opening .stage-left {
-  animation: sideInL 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.8s both;
-}
-.match-stage.is-opening .stage-right {
-  animation: sideInR 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.8s both;
-}
-.match-stage.is-opening .stage-center {
-  animation: stageReveal 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.8s both;
-}
-@keyframes sideInL {
-  0%, 22% { transform: translateX(36px); opacity: 0; }
-  100% { transform: translateX(0); opacity: 1; }
-}
-@keyframes sideInR {
-  0%, 22% { transform: translateX(-36px); opacity: 0; }
-  100% { transform: translateX(0); opacity: 1; }
-}
-@keyframes stageReveal {
-  0%, 22% { transform: scale(0.9); opacity: 0; }
-  100% { transform: scale(1); opacity: 1; }
-}
+/* Curtain reveal: the battle .stage-side cards themselves expand to 50%
+   of the stage width during the matchup hold, then shrink to their battle
+   width (132 / 92 px) when .curtained is removed. ONE card per side
+   throughout — no overlay, no duplicate render, no DOM swap, so there's
+   nothing to "unmount" and nothing to jump.
 
-/* Two tall panels meeting in the middle, then parting outward like curtains
-   to reveal the square between them. */
-.curtain {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  z-index: 6;
-  pointer-events: none;
-  border-radius: 16px;
-  overflow: hidden;
+   The .curtained class is added on initial mount (matchStarting && !
+   curtainParting) and removed when parting starts. To make the SHRINK
+   animate but the MOUNT not animate, the transition is declared on
+   .match-stage:not(.curtained) — that selector matches in the post-state
+   (after .curtained is removed), and CSS reads transition rules from the
+   post-state, so the transition fires on removal but not on addition. */
+.match-stage.curtained {
+  gap: 0;
 }
-/* Curtain layout: each HALF is a flex row of [pad | card-slot | pad].
-   Both pads start the same width so the card-slot is centered in the half
-   during the hold. On parting, the pads animate flex-basis → 0 (same
-   rate), and the flex layout redistributes the freed space — visually the
-   card "slides" toward its battle position. At the end, .curtain-card-slot
-   is at the EXACT same x/y/width as .stage-side underneath, AND the
-   .vs-card inside it is the SAME .vs-card the battle uses (full border +
-   gradient + shadow — no stripping), so on unmount there is zero visual
-   change. The slot and pads paint nothing themselves; the card paints
-   itself, the pads paint the backdrop the card sits on. */
-.curtain {
-  --battle-card-w: 132px;
-  display: flex;
+.match-stage.curtained .stage-side {
+  flex-basis: 50%;
 }
-@media (max-width: 620px) {
-  .curtain { --battle-card-w: 92px; }
+.match-stage.curtained .stage-center {
+  opacity: 0;
 }
-
-.curtain-half {
-  flex: 0 0 50%;
-  display: flex;
-  overflow: hidden;
+/* Hide the INNER border + inner-corner rounding during the curtain hold,
+   so the two halves blend flush at center (no 2px seam, no rounded-corner
+   gap). On parting, the inner border colour fades in and the corners
+   round back to var(--radius), so at end-state the card has its full
+   outline back. The OUTER edges keep their border + rounding throughout —
+   that's the outline the user sees move inward with the shrinking half. */
+.match-stage.curtained .stage-left .vs-card {
+  border-right-color: transparent;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
-/* OPP half: pack to the right so when the pads collapse the card-slot
-   lands at the half's RIGHT edge (= OPPONENT's battle position). LEFT
-   half stays default flex-start so the card lands at the half's LEFT
-   edge (= YOU's battle position). */
-.curtain-half-r { justify-content: flex-end; }
-
-/* Rank-tinted backdrop the card sits ON. The card has its own border /
-   gradient / shadow, so there is NO expectation of a seamless transition
-   between pad and card — they're deliberately distinct layers. Slightly
-   dimmer than the card so the card reads as foreground. */
-.curtain-pad {
-  flex-grow: 0;
-  flex-shrink: 0;
-  /* Initial basis: half the leftover room after the card-slot. Both pads
-     identical → card centered in half. */
-  flex-basis: calc((100% - var(--battle-card-w)) / 2);
-  background: linear-gradient(
-    160deg,
-    color-mix(in srgb, var(--rank, var(--accent)) 26%, #0a0810),
-    color-mix(in srgb, var(--rank, var(--accent)) 6%, #0a0810)
-  );
-  /* Animates with the .parting class added on the parent .curtain. */
+.match-stage.curtained .stage-right .vs-card {
+  border-left-color: transparent;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.match-stage:not(.curtained) {
+  transition: gap 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s;
+}
+.match-stage:not(.curtained) .stage-side {
   transition: flex-basis 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s;
 }
-.curtain.parting .curtain-pad { flex-basis: 0; }
-
-/* Structural container only — paints nothing. The .vs-card inside paints
-   itself. Width + display mirror .stage-side so the card inside is
-   dimensionally identical to the battle card it lands on. */
-.curtain-card-slot {
-  flex: 0 0 var(--battle-card-w);
-  display: flex;
+.match-stage:not(.curtained) .stage-center {
+  transition: opacity 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s;
 }
-/* Match .stage-side .vs-card exactly so the curtain card and the battle
-   card are visually indistinguishable at handoff (no jump on unmount). */
-.curtain-card-slot .vs-card {
-  flex: 1;
-  width: 100%;
-  justify-content: center;
-  padding-bottom: 12px;
+.match-stage:not(.curtained) .stage-left .vs-card {
+  transition:
+    border-right-color 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s,
+    border-top-right-radius 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s,
+    border-bottom-right-radius 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s;
+}
+.match-stage:not(.curtained) .stage-right .vs-card {
+  transition:
+    border-left-color 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s,
+    border-top-left-radius 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s,
+    border-bottom-left-radius 0.8s cubic-bezier(0.76, 0, 0.24, 1) 0.4s;
 }
 @media (max-width: 620px) {
   .match-stage { gap: 7px; }
