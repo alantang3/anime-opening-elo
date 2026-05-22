@@ -1436,6 +1436,10 @@ export default function App() {
     setPanel("stats");
     setMenuOpen(false);
   }
+  function openAbout() {
+    setPanel("about");
+    setMenuOpen(false);
+  }
   const closePanel = () => setPanel(null);
   const inviteUrl = inviteCode
     ? `${window.location.origin}/?invite=${inviteCode}`
@@ -1567,6 +1571,7 @@ export default function App() {
                 <div className="user-dropdown" role="menu">
                   <button onClick={openProfile}>Profile</button>
                   <button onClick={openStats}>Statistics</button>
+                  <button onClick={openAbout}>About</button>
                   <button className="dd-danger" onClick={signOut}>
                     ⏻ Sign out
                   </button>
@@ -1834,6 +1839,86 @@ export default function App() {
                 })}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {panel === "about" && (
+        <div className="modal-backdrop" onClick={closePanel}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>About</h3>
+              <button className="modal-x" onClick={closePanel}>✕</button>
+            </div>
+            {/* Rank legend: a swatch in each rank's colour beside the
+                rank name rendered in the SAME colour, in lowest→highest
+                order. RANKS is already declared lowest-first so iterating
+                it directly matches the spec — and future tier edits show
+                up here automatically. */}
+            <div className="about-ranks">
+              <div className="about-section-title">Ranks</div>
+              {RANKS.map((r) => (
+                <div className="about-rank-row" key={r.name}>
+                  <div
+                    className="about-rank-swatch"
+                    style={{ background: r.color }}
+                  />
+                  <span
+                    className="about-rank-name"
+                    style={{ color: r.color }}
+                  >
+                    {r.name}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="about-creator">
+              <div className="about-section-title">Creator</div>
+              <div className="about-creator-text">
+                Contact the creator to report, support, or make suggestions.
+              </div>
+              <div className="about-icons">
+                <a
+                  className="about-icon"
+                  href="mailto:alandalitang@gmail.com"
+                  aria-label="Email the creator"
+                  title="alandalitang@gmail.com"
+                >
+                  {/* Gmail envelope */}
+                  <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      d="M3 5h18a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm0 2v.6l9 5.4 9-5.4V7H3zm0 2.9V17h18V9.9l-9 5.4-9-5.4z"
+                    />
+                  </svg>
+                </a>
+                <a
+                  className="about-icon"
+                  href="https://www.instagram.com/alan_tang3/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="Instagram @alan_tang3"
+                  title="@alan_tang3"
+                >
+                  {/* Instagram */}
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="20"
+                    height="20"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <rect x="3" y="3" width="18" height="18" rx="5" />
+                    <circle cx="12" cy="12" r="4" />
+                    <circle cx="17.5" cy="6.5" r="0.6" fill="currentColor" stroke="none" />
+                  </svg>
+                </a>
+              </div>
+            </div>
           </div>
         </div>
       )}

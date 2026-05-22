@@ -1330,6 +1330,105 @@ button.danger:hover:not(:disabled) {
 .profile-ava { display: flex; justify-content: center; margin-bottom: 18px; }
 .modal .name-editor { margin: 0; }
 
+/* ---------- About panel: rank legend + creator contact ---------- */
+
+/* Shared header for both boxes ("Ranks", "Creator") — white,
+   mixed-case (no uppercasing), sits flush at the top of its box. */
+.about-section-title {
+  color: #fff;
+  font-weight: 800;
+  font-size: 16px;
+  margin-bottom: 10px;
+  letter-spacing: 0.01em;
+}
+
+.about-ranks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  margin-bottom: 16px;
+}
+.about-rank-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.about-rank-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  box-shadow: 0 0 10px -2px rgba(0, 0, 0, 0.6),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+.about-rank-name {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  /* Subtle dark shadow keeps very pale ranks (Anime God = #fff,
+     Super Saiyan = #ffd23d) legible on the panel-2 background. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+.about-creator {
+  padding: 16px;
+  border-radius: var(--radius);
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--accent) 22%, var(--panel-2)),
+    color-mix(in srgb, var(--accent) 6%, var(--panel))
+  );
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  box-shadow:
+    0 0 20px -6px color-mix(in srgb, var(--accent) 50%, transparent),
+    inset 0 0 24px -10px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.about-creator-text {
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+  opacity: 0.94;
+}
+.about-icons {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+}
+.about-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  color: #fff;
+  text-decoration: none;
+  /* Purple → white-tinted gradient, matching AniTune's accent. */
+  background: linear-gradient(
+    135deg,
+    var(--accent-strong),
+    color-mix(in srgb, var(--accent) 35%, #fff)
+  );
+  border: 1px solid color-mix(in srgb, #fff 30%, transparent);
+  box-shadow:
+    0 0 14px -2px color-mix(in srgb, var(--accent) 70%, transparent),
+    inset 0 0 12px -6px rgba(255, 255, 255, 0.4);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.about-icon:hover {
+  transform: scale(1.08);
+  box-shadow:
+    0 0 22px -2px color-mix(in srgb, var(--accent) 80%, transparent),
+    inset 0 0 14px -4px rgba(255, 255, 255, 0.55);
+}
+.about-icon:active { transform: scale(0.96); }
+.about-icon svg { display: block; }
+
 /* ---------- Lobby: identity + nyalea play stage ---------- */
 .lobby { text-align: center; padding: 8px 0 4px; }
 .lobby-ava-ro { cursor: default; }
