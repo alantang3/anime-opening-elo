@@ -35,9 +35,17 @@ export const MANUAL_ALIASES = [
   // dropped in casual reference.
   { matches: /\bmadoka magica\b/, aliases: ["madoka magica", "madoka"] },
 
-  // Bunny Girl Senpai — the substring everyone calls the show by,
-  // unreachable from the full Japanese title by any auto rule.
-  { matches: /\bbunny girl senpai\b/, aliases: ["bunny girl senpai"] },
+  // Bunny Girl Senpai — the franchise has multiple sequels/movies, and
+  // only the ORIGINAL season's title literally contains "Bunny Girl
+  // Senpai" (sequels are "...Yumemiru Shoujo...", "...Petit Devil
+  // Kouhai...", etc.). Trigger on the franchise umbrella names that ARE
+  // in every season's titles: "Seishun Buta Yarou" (Japanese) and
+  // "Rascal Does Not Dream" (English). All three fan-standard aliases
+  // get added so a guess of any form works for any season.
+  {
+    matches: /\b(seishun buta yarou|rascal does not dream|bunny girl senpai)\b/,
+    aliases: ["bunny girl senpai", "seishun buta yarou", "rascal does not dream"],
+  },
 
   // Haikyu(u) — also covered by the splitSubtitle "!! " delimiter
   // improvement, but explicit here in case future titles format
