@@ -29,6 +29,13 @@ export function normalize(s) {
     .normalize("NFC")
     .toLowerCase()
     .replace(/[&＋+]/g, " and ")
+    // Apostrophes (straight ', curly ', modifier ʼ) are STRIPPED, not
+    // replaced with a space — they live inside words ("jojo's", "don't",
+    // "k-on") and splitting on them produces phantom 1-char tokens that
+    // screw up acronym generation and tokenization. Colons, hyphens,
+    // and other punctuation still become spaces below (so "re:zero"
+    // still becomes "re zero", which we want).
+    .replace(/['’ʼ]/g, "")
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -160,13 +167,32 @@ function splitSubtitle(raw) {
   return [s.slice(0, m.index).trim(), s.slice(m.index + m[0].length).trim()];
 }
 
+// Strip trailing parenthetical disambiguation: "Bleach (TV)" → "Bleach",
+// "Hyouka (2012)" → "Hyouka", "Some Show (TV) (2003)" → "Some Show".
+// MAL/AniList use these tails to differentiate broadcast format or year
+// when two shows share a base title, but real players never type them.
+// Without stripping, "bleach" exact-matches nothing (the accepted set
+// only has "bleach tv") and substring-match can't help either because
+// single-word guesses are rejected by isSubstringMatch's safety guards.
+// Greedy match collapses runs of trailing groups in one pass.
+function stripTrailingParens(s) {
+  return String(s || "").replace(/(?:\s*\([^)]*\))+\s*$/g, "").trim();
+}
+
 function addName(set, raw) {
   addOne(set, raw);
+  // Add the parens-stripped form too. Strictly additive — keeps the
+  // original ("bleach tv") AND adds "bleach" so both work as guesses.
+  const noParens = stripTrailingParens(raw);
+  if (noParens && noParens !== raw) addOne(set, noParens);
   // Players name the FRANCHISE, which is the part before the subtitle:
   // "Code Geass: Hangyaku no Lelouch" → "code geass"; "Demon Slayer:
-  // Kimetsu no Yaiba Swordsmith Village Arc" → "demon slayer". Strictly
-  // additive — only ever makes more correct, never fewer.
-  const [root, sub] = splitSubtitle(raw);
+  // Kimetsu no Yaiba Swordsmith Village Arc" → "demon slayer". Run the
+  // split on the parens-stripped form so a title like "Foo: Bar (TV)"
+  // also yields "Foo" (it would anyway via raw, but staying consistent
+  // avoids surprises with parens that contain colons).
+  const base = noParens || raw;
+  const [root, sub] = splitSubtitle(base);
   if (root && normalize(root).length >= 3) addOne(set, root);
   // The subtitle too ("Kaguya-sama: Love Is War" → "love is war"), but only
   // when it's a real name — season/part/movie markers strip to nothing.

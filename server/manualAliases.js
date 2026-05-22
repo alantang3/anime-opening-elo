@@ -43,4 +43,34 @@ export const MANUAL_ALIASES = [
   // improvement, but explicit here in case future titles format
   // differently. Matches both "haikyuu" and "haikyu" spellings.
   { matches: /\bhaikyu+\b/, aliases: ["haikyuu", "haikyu"] },
+
+  // Noragami — sequel "Noragami Aragoto" has no subtitle delimiter and
+  // AnimeThemes' series field isn't reliably set for it, so neither
+  // auto layer catches the franchise base. "noragami" alone is what
+  // fans actually type. Matching `noragami` (which trivially matches
+  // both seasons' titles) keeps this one rule covering both.
+  { matches: /\bnoragami\b/, aliases: ["noragami"] },
+
+  // Saiki K — auto-generated acronyms come out "sknpn" / "dlosk", and
+  // substring match of "saiki k" against the full English title is
+  // blocked by the >=2-substantive-words guard (the "k" is one char).
+  // Add the fan-standard forms explicitly. Match either the Japanese
+  // ("saiki kusuo") or English ("saiki k") name so any source brings
+  // in all variants.
+  {
+    matches: /\bsaiki (kusuo|k)\b/,
+    aliases: ["saiki k", "saiki", "saikik"],
+  },
+
+  // JoJo — every season is "JoJo's Bizarre Adventure: <subtitle>" or
+  // its Japanese name "JoJo no Kimyou na Bouken". The subtitle split
+  // already lands the franchise root in the set, but fans
+  // overwhelmingly just type "jojo". Matches against the normalized
+  // form (apostrophes are stripped in normalize), so we check both
+  // "jojos bizarre" (English) and "jojo no kimyou" (Japanese) — either
+  // identifies the franchise.
+  {
+    matches: /\b(jojos? bizarre|jojo no kimyou)\b/,
+    aliases: ["jojo", "jojos"],
+  },
 ];

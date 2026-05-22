@@ -82,11 +82,17 @@ app.use(cors());
 // policy; ship the rest now and add CSP separately once we can test it.
 // CORP is set to cross-origin so the static avatar files / images remain
 // loadable from the SPA during dev (Vite on a different port).
+// COOP must be "same-origin-allow-popups": Google Identity Services'
+// popup flow does window.opener.postMessage back to us with the
+// credential — the stricter "same-origin" default silently swallows
+// that message, so the popup closes successfully but the client never
+// receives the token and the sign-in just stalls.
 app.use(
   helmet({
     contentSecurityPolicy: false,
     crossOriginEmbedderPolicy: false,
     crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
   })
 );
 app.use(express.json({ limit: "3mb" })); // headroom for base64 avatar uploads
