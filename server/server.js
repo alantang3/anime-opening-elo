@@ -13,6 +13,8 @@
 
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import http from "http";
 import crypto from "crypto";
 import path from "path";
@@ -70,8 +72,52 @@ const BOT_NAMES = [
 
 // ---------- HTTP ----------
 const app = express();
+// Render/Fly terminate TLS at a front proxy; trust the immediate hop so
+// express-rate-limit sees the real client IP via X-Forwarded-For instead
+// of every request looking like it came from the load balancer.
+app.set("trust proxy", 1);
 app.use(cors());
+// Security headers. CSP is disabled because the SPA + Google Identity
+// Services iframe + inline styles from Vite would need a carefully-tuned
+// policy; ship the rest now and add CSP separately once we can test it.
+// CORP is set to cross-origin so the static avatar files / images remain
+// loadable from the SPA during dev (Vite on a different port).
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 app.use(express.json({ limit: "3mb" })); // headroom for base64 avatar uploads
+
+// ---------- Rate limits (per-IP) ----------
+// Public endpoints only. Authenticated socket events are throttled below
+// via a per-socket sliding window.
+const rl = (windowMs, limit, message) =>
+  rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: message ? { error: message } : undefined,
+  });
+// Autocomplete fires per keystroke; legitimate users blow past 60/min
+// easily (a few search sessions in a minute). 120/min/IP still kills the
+// iterate-uniques cache-bypass attack since each unique query also has
+// to clear the 2..50 char length gate below.
+const limitSearch = rl(60_000, 120);
+// One IP creating 5 guest accounts a day is plenty; anything more is bot
+// spam polluting the players table.
+const limitGuestAuth = rl(
+  24 * 60 * 60_000,
+  5,
+  "Too many guest sign-ups from this network today. Try again tomorrow."
+);
+const limitGoogleAuth = rl(60 * 60_000, 20);
+const limitAvatarUpload = rl(60 * 60_000, 5, "Slow down on avatar changes.");
+const limitMeRead = rl(60_000, 60);
+const limitLeaderboard = rl(60_000, 60);
 
 // User-uploaded avatars live on the persistent disk and are served here.
 const AVATAR_DIR = path.join(DATA_DIR, "avatars");
@@ -83,10 +129,10 @@ app.use(
 
 // Pull the authenticated player from a Bearer session token (HTTP routes;
 // the socket has its own auth). Returns the player row or null.
-function authPlayer(req) {
+async function authPlayer(req) {
   const m = /^Bearer (.+)$/.exec(req.headers.authorization || "");
   const s = m && verifySession(m[1]);
-  return s?.sub ? getPlayer(s.sub) : null;
+  return s?.sub ? await getPlayer(s.sub) : null;
 }
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
@@ -98,7 +144,7 @@ app.get("/api/config", (_req, res) =>
 
 // Exchange a Google credential for our session token. Accepts either an ID
 // token (legacy GIS button) or an OAuth access token (our custom button).
-app.post("/api/auth/google", async (req, res) => {
+app.post("/api/auth/google", limitGoogleAuth, async (req, res) => {
   try {
     const { credential, accessToken } = req.body || {};
     const { token, player } = accessToken
@@ -115,14 +161,14 @@ app.post("/api/auth/google", async (req, res) => {
 // creates a brand-new account, returns a session token like Google does.
 // No password, no email — they just play as that account until they clear
 // their browser. Same rate-limit and image-size rules as the avatar upload.
-app.post("/api/auth/guest", (req, res) => {
+app.post("/api/auth/guest", limitGuestAuth, async (req, res) => {
   try {
     const { nickname, avatar: dataUrl } = req.body || {};
     const clean = String(nickname || "").replace(/\s+/g, " ").trim().slice(0, 24);
     if (clean.length < 2)
       return res.status(400).json({ error: "name must be 2-24 chars" });
     // First create the player (so we have an id to key the avatar file by).
-    let player = createGuestPlayer({ nickname: clean, avatar: null });
+    let player = await createGuestPlayer({ nickname: clean, avatar: null });
     // Optional avatar upload via base64 data URL.
     if (dataUrl) {
       const m = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(String(dataUrl));
@@ -136,7 +182,7 @@ app.post("/api/auth/guest", (req, res) => {
       } catch {
         return res.status(500).json({ error: "could not save image" });
       }
-      player = setCustomAvatar(player.id, `/avatars/${player.id}.${ext}?t=${Date.now()}`);
+      player = await setCustomAvatar(player.id, `/avatars/${player.id}.${ext}?t=${Date.now()}`);
     }
     res.json({ token: issueSession(player), player: publicPlayer(player) });
   } catch (err) {
@@ -152,8 +198,12 @@ const searchCache = new Map(); // q -> { at, results }
 const SEARCH_TTL_MS = 10 * 60 * 1000;
 const SEARCH_CACHE_MAX = 500;
 
-app.get("/api/search", async (req, res) => {
+app.get("/api/search", limitSearch, async (req, res) => {
   const q = String(req.query.q || "").trim().toLowerCase();
+  // Length-bound the query before doing anything else. Stops the
+  // iterate-uniques cache-bypass abuse (?q=a, ?q=aa, ?q=aaa, …) AND
+  // empty/typo'd hits that wouldn't return useful results anyway.
+  if (q.length < 2 || q.length > 50) return res.json({ results: [] });
   const hit = searchCache.get(q);
   if (hit && Date.now() - hit.at < SEARCH_TTL_MS) {
     return res.json({ results: hit.results });
@@ -198,24 +248,24 @@ const GHOST_PLAYERS = [
   { id: "ghost:19", nickname: "HikariWave",  elo: 2428, wins: 326, losses: 242, draws: 17, avatar: "/default.png" },
 ];
 
-app.get("/api/leaderboard", (_req, res) => {
-  const merged = [...leaderboard(50), ...GHOST_PLAYERS]
+app.get("/api/leaderboard", limitLeaderboard, async (_req, res) => {
+  const merged = [...(await leaderboard(50)), ...GHOST_PLAYERS]
     .sort((a, b) => b.elo - a.elo)
     .slice(0, 20);
   res.json({ players: merged });
 });
 
 // Stats + recent matches for the signed-in player.
-app.get("/api/me/stats", (req, res) => {
-  const p = authPlayer(req);
+app.get("/api/me/stats", limitMeRead, async (req, res) => {
+  const p = await authPlayer(req);
   if (!p) return res.status(401).json({ error: "sign in" });
-  res.json(getPlayerStats(p.id, 12));
+  res.json(await getPlayerStats(p.id, 12));
 });
 
 // Upload a custom profile picture (base64 data URL in JSON).
 const AVATAR_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
-app.post("/api/me/avatar", (req, res) => {
-  const p = authPlayer(req);
+app.post("/api/me/avatar", limitAvatarUpload, async (req, res) => {
+  const p = await authPlayer(req);
   if (!p) return res.status(401).json({ error: "sign in" });
   const m = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(
     String(req.body?.image || "")
@@ -238,7 +288,7 @@ app.post("/api/me/avatar", (req, res) => {
     return res.status(500).json({ error: "could not save image" });
   }
   const url = `/avatars/${p.id}.${ext}?t=${Date.now()}`;
-  const updated = setCustomAvatar(p.id, url);
+  const updated = await setCustomAvatar(p.id, url);
   res.json({ player: publicPlayer(updated) });
 });
 
@@ -249,7 +299,6 @@ app.post("/api/me/avatar", (req, res) => {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.join(__dirname, "..", "client", "dist");
 if (fs.existsSync(path.join(CLIENT_DIST, "index.html"))) {
-  app.set("trust proxy", 1); // Render/Fly terminate TLS at a front proxy
   app.use(express.static(CLIENT_DIST));
   // SPA fallback: any non-API GET returns index.html. Socket.IO intercepts
   // /socket.io before Express, so it never reaches this.
@@ -294,56 +343,120 @@ function publicPlayer(row) {
 }
 
 // ---------- Matchmaking ----------
-function clearBotTimer(c) {
-  if (c?.botTimer) {
-    clearTimeout(c.botTimer);
-    c.botTimer = null;
-  }
+// Tiered Elo bands: the band you'll accept widens with wait time so a
+// just-queued player isn't immediately paired against someone wildly out
+// of their range, but a long-waiting player isn't punished by an empty
+// queue. Within the band, we pair with the LONGEST-WAITING viable
+// partner (not by closest Elo) — feels fairer because the person who's
+// been waiting longest gets served first.
+//
+//   wait < 5s  → ±600 Elo
+//   wait < 10s → ±1000 Elo
+//   wait ≥ 10s → any Elo; if still no human, bot
+const BAND_TIER_1_MS = 5_000;
+const BAND_TIER_1_ELO = 600;
+const BAND_TIER_2_MS = 10_000;
+const BAND_TIER_2_ELO = 1000;
+// The matchmaker tick re-runs even when nobody joins/leaves so that band
+// widening (and the bot fallback at BOT_WAIT_MS) fire on time. 1s
+// resolution means worst-case bot-fallback is BOT_WAIT_MS + 1s.
+const MATCHMAKER_TICK_MS = 1000;
+
+function eloBandFor(waitMs) {
+  if (waitMs < BAND_TIER_1_MS) return BAND_TIER_1_ELO;
+  if (waitMs < BAND_TIER_2_MS) return BAND_TIER_2_ELO;
+  return Infinity;
 }
 
-function enqueue(socketId) {
+async function enqueue(socketId) {
   const c = conns.get(socketId);
   if (!c || c.status !== "idle") return;
   if (!queue.includes(socketId)) queue.push(socketId);
   c.status = "queued";
+  // Stamp wait-start so band-widening is deterministic. Elo is cached
+  // here too: it can't change while you're in the queue (you're not
+  // playing), so reading it once avoids a per-tick DB read per candidate.
+  c.queuedAt = Date.now();
+  c.eloAtQueue = ((await getPlayer(c.player.id)) || c.player).elo;
+  // After the await, the player might have disconnected — bail rather
+  // than leaving a dead entry in the queue.
+  if (!conns.has(socketId) || c.status !== "queued") return;
   c.socket.emit("queued");
-  // No human within BOT_WAIT_MS → drop this player into a bot match.
-  clearBotTimer(c);
-  c.botTimer = setTimeout(() => startBotMatch(socketId), BOT_WAIT_MS);
   tryMatch();
 }
 
 function dequeue(socketId) {
   queue = queue.filter((id) => id !== socketId);
   const c = conns.get(socketId);
-  clearBotTimer(c);
   if (c && c.status === "queued") {
     c.status = "idle";
+    c.queuedAt = null;
     c.socket.emit("queueCancelled");
   }
 }
 
-function tryMatch() {
-  while (queue.length >= 2) {
-    const aId = queue.shift();
-    const bId = queue.shift();
-    const a = conns.get(aId);
-    const b = conns.get(bId);
-    // Skip stale entries (disconnected / already elsewhere).
-    if (!a || a.status !== "queued") {
-      if (b && b.status === "queued") queue.unshift(bId);
+// One scan of the queue: pair the longest-waiting player whose band finds
+// a partner. Repeat until no more pairs form, then return. Players whose
+// band is too narrow this tick are skipped — they'll widen on a later
+// tick. Async because createMatch refreshes player.elo from Postgres
+// before emitting matchFound; the queue manipulation itself is sync.
+async function tryMatch() {
+  // Players that we've already tried (and failed) to pair THIS tick. We
+  // skip them on subsequent iterations so we keep moving down the queue
+  // looking for pairs that ARE possible right now (e.g., two mid-Elo
+  // newcomers can pair even if the longest-waiting top-Elo player has
+  // no partner in their band yet).
+  const skip = new Set();
+
+  while (true) {
+    const candidates = queue
+      .map((id) => conns.get(id))
+      .filter((c) => c && c.status === "queued" && !skip.has(c.socket.id));
+    if (candidates.length === 0) return;
+    // Longest waiting first — gives priority to people who've been
+    // waiting the most when picking who to try to pair next.
+    candidates.sort((a, b) => a.queuedAt - b.queuedAt);
+    const a = candidates[0];
+    const aWait = Date.now() - a.queuedAt;
+    const band = eloBandFor(aWait);
+
+    // Find the longest-waiting viable partner within a's band.
+    let best = null;
+    for (let i = 1; i < candidates.length; i++) {
+      const b = candidates[i];
+      if (Math.abs(a.eloAtQueue - b.eloAtQueue) > band) continue;
+      // candidates is already sorted oldest-first, so the first viable
+      // one IS the longest-waiting viable partner.
+      best = b;
+      break;
+    }
+
+    if (best) {
+      queue = queue.filter(
+        (id) => id !== a.socket.id && id !== best.socket.id
+      );
+      await createMatch(a, best);
+      continue; // try to form more pairs from what's left
+    }
+
+    // No human partner. If a has crossed the bot threshold, drop them
+    // into a bot match — there's literally nobody else viable.
+    if (aWait >= BOT_WAIT_MS) {
+      queue = queue.filter((id) => id !== a.socket.id);
+      await createMatch(a, await makeBotConn(a));
       continue;
     }
-    if (!b || b.status !== "queued") {
-      queue.unshift(aId);
-      continue;
-    }
-    createMatch(a, b);
+
+    // a can't pair yet (band too narrow + not bot-eligible). Skip them
+    // for the rest of this tick and try shorter-waiting candidates —
+    // they might still pair among themselves even though they failed
+    // to match with a.
+    skip.add(a.socket.id);
   }
 }
 
 // ---------- Match lifecycle ----------
-function createMatch(a, b) {
+async function createMatch(a, b) {
   const id = crypto.randomUUID();
   const match = {
     id,
@@ -363,14 +476,13 @@ function createMatch(a, b) {
   matches.set(id, match);
 
   for (const c of match.members) {
-    clearBotTimer(c);
     queue = queue.filter((qid) => qid !== c.socket.id);
     c.status = "match";
     c.matchId = id;
     c.socket.join(id);
     // conn.player is only set at auth, never after applyMatchResult — re-read
     // so matchFound's `you` reflects Elo earned earlier this session.
-    if (!c.isBot) c.player = getPlayer(c.player.id) || c.player;
+    if (!c.isBot) c.player = (await getPlayer(c.player.id)) || c.player;
   }
   const [pa, pb] = match.members;
   // `polite` is the WebRTC perfect-negotiation tiebreaker — exactly one peer
@@ -406,9 +518,12 @@ async function startRound(match) {
 
   // FIFO matchmaking ignores Elo, but the players' AVERAGE Elo decides how
   // obscure the opening is: low avg → popular/easy, high avg → deep cut.
-  const avgElo =
-    match.members.reduce((s, c) => s + freshSnapshot(c).eloRaw, 0) /
-    match.members.length;
+  let sumElo = 0;
+  for (const c of match.members) sumElo += (await freshSnapshot(c)).eloRaw;
+  const avgElo = sumElo / match.members.length;
+  // freshSnapshot above awaited DB reads; if the match was torn down
+  // (e.g. both players disconnected during a slow round-pick), bail.
+  if (!matches.has(match.id)) return;
 
   let opening;
   try {
@@ -506,14 +621,17 @@ function beginCountdown(match) {
     match.state = "playing";
     match.startedAt = Date.now();
     match.timers.end = setTimeout(
-      () => onRoundTimeout(match),
+      () =>
+        onRoundTimeout(match).catch((err) =>
+          console.error("onRoundTimeout:", err.message)
+        ),
       match.durationMs
     );
     if (match.bot) scheduleBotPlay(match);
   }, COUNTDOWN_MS);
 }
 
-function handleGuess(match, conn, { animeId, guessText } = {}) {
+async function handleGuess(match, conn, { animeId, guessText } = {}) {
   // If the round isn't actively playing on the server but the client still
   // thinks it is (likely a lost round:end during the video-alternate dance),
   // tell the client to resync so the UI doesn't stay wedged in an
@@ -536,21 +654,23 @@ function handleGuess(match, conn, { animeId, guessText } = {}) {
     conn.socket.to(match.id).emit("opponent:guessed", { correct: false });
     return;
   }
-  settleWin(match, conn);
+  await settleWin(match, conn);
 }
 
-function freshSnapshot(conn) {
+async function freshSnapshot(conn) {
   // Re-read so Elo reflects earlier rounds played within this same match.
-  return snapshot(getPlayer(conn.player.id) || conn.player);
+  return snapshot((await getPlayer(conn.player.id)) || conn.player);
 }
 
-function settleWin(match, winnerConn) {
+async function settleWin(match, winnerConn) {
   match.state = "result";
   clearTimers(match);
 
   const loserConn = match.members.find((c) => c !== winnerConn);
-  const w = freshSnapshot(winnerConn);
-  const l = freshSnapshot(loserConn);
+  const w = await freshSnapshot(winnerConn);
+  if (!matches.has(match.id)) return;
+  const l = await freshSnapshot(loserConn);
+  if (!matches.has(match.id)) return;
   const pop = match.popularity || { factor: 0.5 };
   // disconnectForfeit is set for both voluntary forfeits and real disconnects.
   // voluntary is set ONLY when the loser hit the Forfeit button — in that
@@ -570,7 +690,7 @@ function settleWin(match, winnerConn) {
     ? "disconnect"
     : "win";
 
-  applyMatchResult({
+  await applyMatchResult({
     outcome: outcomeLabel,
     animeName: match.opening.anime.name,
     malId: match.opening.malId,
@@ -584,6 +704,7 @@ function settleWin(match, winnerConn) {
       wins: l.wins, losses: l.losses, draws: l.draws,
     },
   });
+  if (!matches.has(match.id)) return;
 
   // A bot has no DB row, so freshSnapshot() reads its in-memory player —
   // persist its new rating there so it actually gains/loses across rematches
@@ -617,17 +738,19 @@ function settleWin(match, winnerConn) {
   beginRematch(match);
 }
 
-function onRoundTimeout(match) {
+async function onRoundTimeout(match) {
   if (!matches.has(match.id) || match.state !== "playing") return;
   match.state = "result";
   clearTimers(match);
 
   const [ca, cb] = match.members;
-  const a = freshSnapshot(ca);
-  const b = freshSnapshot(cb);
+  const a = await freshSnapshot(ca);
+  if (!matches.has(match.id)) return;
+  const b = await freshSnapshot(cb);
+  if (!matches.has(match.id)) return;
   const r = resolveTimeout(a.eloRaw, b.eloRaw);
 
-  applyMatchResult({
+  await applyMatchResult({
     outcome: "timeout",
     animeName: match.opening.anime.name,
     malId: match.opening.malId,
@@ -635,6 +758,7 @@ function onRoundTimeout(match) {
     a: { id: a.id, nickname: a.nickname, eloBefore: a.eloRaw, eloAfter: r.aAfter, wins: a.wins, losses: a.losses, draws: a.draws },
     b: { id: b.id, nickname: b.nickname, eloBefore: b.eloRaw, eloAfter: r.bAfter, wins: b.wins, losses: b.losses, draws: b.draws },
   });
+  if (!matches.has(match.id)) return;
 
   for (const m of match.members) {
     if (!m.isBot) continue;
@@ -908,7 +1032,7 @@ function dissolveMatch(match, { requeue = false, reason } = {}, leaverId) {
 // drop straight into the normal rematch handshake so the SAME two players can
 // choose to play each other again. Only valid before a round is decided;
 // ignored on the result/vote screen (it already played).
-function abortUnplayable(match) {
+async function abortUnplayable(match) {
   if (!matches.has(match.id)) return;
   if (!["preparing", "countdown", "playing"].includes(match.state)) return;
   if (!match.opening) return; // nothing to reveal yet — let it time out
@@ -916,7 +1040,9 @@ function abortUnplayable(match) {
   clearTimers(match);
 
   const perSocket = { outcome: "unplayable" };
-  const snaps = new Map(match.members.map((c) => [c, freshSnapshot(c)]));
+  const snaps = new Map();
+  for (const c of match.members) snaps.set(c, await freshSnapshot(c));
+  if (!matches.has(match.id)) return;
   for (const c of match.members) {
     const s = snaps.get(c);
     const other = match.members.find((m) => m !== c);
@@ -1050,7 +1176,7 @@ function handleDisconnectDuringMatch(match, goneConn) {
 // down: the forfeiter just loses THIS round (opponent wins it, forfeit Elo
 // applies), then both players enter the normal rematch handshake — so they
 // can choose to play each other again.
-function voluntaryForfeit(match, leaverConn) {
+async function voluntaryForfeit(match, leaverConn) {
   if (!matches.has(match.id)) return;
   const winner = match.members.find((c) => c !== leaverConn);
   if (!winner) return;
@@ -1083,14 +1209,14 @@ function voluntaryForfeit(match, leaverConn) {
   match.disconnectForfeit = true; // result reads "You forfeited" / "…you win"
   match.voluntary = true;         // distinguishes from real network disconnect
   match.state = "playing";        // shape the window settleWin expects
-  settleWin(match, winner);       // applies Elo, emits round:end, beginRematch
+  await settleWin(match, winner); // applies Elo, emits round:end, beginRematch
 }
 
 // ---------- Bot opponent ----------
 const clamp01 = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
-function makeBotConn(humanConn) {
-  const base = freshSnapshot(humanConn).eloRaw;
+async function makeBotConn(humanConn) {
+  const base = (await freshSnapshot(humanConn)).eloRaw;
   const elo = Math.max(
     100,
     Math.round(base + (Math.random() * 2 - 1) * BOT_ELO_JITTER)
@@ -1121,13 +1247,10 @@ function makeBotConn(humanConn) {
   };
 }
 
-function startBotMatch(socketId) {
-  const c = conns.get(socketId);
-  if (!c || c.status !== "queued") return;
-  queue = queue.filter((id) => id !== socketId);
-  clearBotTimer(c);
-  createMatch(c, makeBotConn(c));
-}
+// (Bot match-creation now lives inline in tryMatch — when a candidate
+// crosses BOT_WAIT_MS without finding any human, the matchmaker tick
+// pairs them with makeBotConn(c) directly. Keeping startBotMatch around
+// as a separate helper would just be a one-line wrapper.)
 
 // The bot "plays": with popularity-adjusted accuracy it submits a correct
 // guess at a random moment; otherwise it stays quiet (and may fake a miss
@@ -1147,7 +1270,9 @@ function scheduleBotPlay(match) {
     const delay = 2500 + Math.random() * (dur * 0.85 - 2500);
     match.timers.bot = setTimeout(() => {
       if (matches.has(match.id) && match.state === "playing")
-        settleWin(match, bot);
+        settleWin(match, bot).catch((err) =>
+          console.error("bot settleWin:", err.message)
+        );
     }, Math.max(2000, delay));
   } else if (Math.random() < 0.6) {
     const delay = 3000 + Math.random() * (dur * 0.7);
@@ -1193,6 +1318,28 @@ setInterval(() => {
     }
 }, 60_000).unref?.();
 
+// ---------- Per-socket throttle ----------
+// A single malicious socket could spam invite creation, joinInvite brute
+// force, repeated round:videoFailed (each first call triggers an alt-list
+// fetch), or auth attempts. Token-bucket per (socket, event): tokens
+// refill at refillPerSec, capped at capacity. Drop overage silently —
+// emitting a warning to the offender just helps them tune their flood.
+function rateOk(conn, event, capacity, refillPerSec) {
+  if (!conn) return false;
+  conn.buckets = conn.buckets || {};
+  const now = Date.now();
+  let b = conn.buckets[event];
+  if (!b) {
+    b = { tokens: capacity, last: now };
+    conn.buckets[event] = b;
+  }
+  b.tokens = Math.min(capacity, b.tokens + ((now - b.last) / 1000) * refillPerSec);
+  b.last = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+
 // ---------- Socket wiring ----------
 io.on("connection", (socket) => {
   conns.set(socket.id, {
@@ -1200,15 +1347,18 @@ io.on("connection", (socket) => {
     player: null,
     status: "idle",
     matchId: null,
+    buckets: {},
   });
 
   // Account required: authenticate the socket with our session token
   // (obtained from POST /api/auth/google). No guest path.
-  socket.on("auth", ({ token } = {}) => {
+  socket.on("auth", async ({ token } = {}) => {
     const c = conns.get(socket.id);
     if (!c) return;
+    // Slow down token-guessing on auth: 5 attempts, refilling 1/min.
+    if (!rateOk(c, "auth", 5, 1 / 60)) return;
     const session = verifySession(token);
-    const row = session?.sub ? getPlayer(session.sub) : null;
+    const row = session?.sub ? await getPlayer(session.sub) : null;
     if (!row) {
       socket.emit("authError", { message: "Please sign in again." });
       return;
@@ -1235,13 +1385,13 @@ io.on("connection", (socket) => {
   });
 
   // Set a custom display name (persists to the account).
-  socket.on("setNickname", ({ nickname } = {}) => {
+  socket.on("setNickname", async ({ nickname } = {}) => {
     const c = conns.get(socket.id);
     if (!c?.player) {
       socket.emit("authError", { message: "Sign in first." });
       return;
     }
-    const row = setNickname(c.player.id, nickname);
+    const row = await setNickname(c.player.id, nickname);
     if (!row) {
       socket.emit("nicknameError", {
         message: "Name must be 2–24 characters.",
@@ -1252,17 +1402,18 @@ io.on("connection", (socket) => {
     socket.emit("profileUpdated", { player: publicPlayer(row) });
   });
 
-  socket.on("queue", () => {
+  socket.on("queue", async () => {
     const c = conns.get(socket.id);
     if (!c?.player) {
       socket.emit("authError", { message: "Sign in to play." });
       return;
     }
+    if (!rateOk(c, "queue", 10, 10 / 60)) return;
     if (c.status === "inviting") removeInvitesBy(socket.id);
-    if (c.status === "idle") enqueue(socket.id);
+    if (c.status === "idle") await enqueue(socket.id);
   });
 
-  socket.on("cancelQueue", () => {
+  socket.on("cancelQueue", async () => {
     const c = conns.get(socket.id);
     // Safety net: if we're already in a match (the client may have raced
     // matchFound vs. its own Home-click and sent cancelQueue from the
@@ -1279,7 +1430,7 @@ io.on("connection", (socket) => {
           m.state === "countdown" ||
           m.state === "playing")
       ) {
-        voluntaryForfeit(m, c);
+        await voluntaryForfeit(m, c);
         return;
       }
     }
@@ -1293,6 +1444,9 @@ io.on("connection", (socket) => {
       socket.emit("authError", { message: "Sign in first." });
       return;
     }
+    // 5 invites per minute is plenty; anything more is creating dead links
+    // to chew memory (each lives INVITE_TTL_MS = 15min).
+    if (!rateOk(c, "createInvite", 5, 5 / 60)) return;
     if (c.status === "queued") dequeue(socket.id);
     if (c.status !== "idle") {
       socket.emit("inviteError", { message: "Finish your current match first." });
@@ -1310,12 +1464,15 @@ io.on("connection", (socket) => {
     socket.emit("inviteCancelled");
   });
 
-  socket.on("joinInvite", ({ code } = {}) => {
+  socket.on("joinInvite", async ({ code } = {}) => {
     const c = conns.get(socket.id);
     if (!c?.player) {
       socket.emit("authError", { message: "Sign in to play." });
       return;
     }
+    // Stops brute-force code discovery (30-char alphabet, 6 chars =
+    // ~729M codes — 20 attempts/min/socket makes this infeasible).
+    if (!rateOk(c, "joinInvite", 20, 20 / 60)) return;
     if (c.status === "queued") dequeue(socket.id);
     if (c.status === "inviting") removeInvitesBy(socket.id);
     if (c.status !== "idle") {
@@ -1336,7 +1493,7 @@ io.on("connection", (socket) => {
     }
     invites.delete(String(code).toUpperCase());
     removeInvitesBy(host.socket.id);
-    createMatch(host, c);
+    await createMatch(host, c);
   });
 
   socket.on("mediaDuration", ({ ms } = {}) => {
@@ -1346,10 +1503,10 @@ io.on("connection", (socket) => {
   });
 
   // The opening wouldn't play on this client → scrap the round, requeue both.
-  socket.on("roundUnplayable", () => {
+  socket.on("roundUnplayable", async () => {
     const c = conns.get(socket.id);
     const m = c?.matchId && matches.get(c.matchId);
-    if (m) abortUnplayable(m);
+    if (m) await abortUnplayable(m);
   });
 
   // A video link wouldn't play here — hand back the next encode of the
@@ -1361,6 +1518,11 @@ io.on("connection", (socket) => {
   // encoding, same audio-first preference as the primary.
   socket.on("round:videoFailed", async ({ url } = {}) => {
     const c = conns.get(socket.id);
+    // Each first call per round can trigger an AnimeThemes fetch
+    // (mitigated by the alt-list cache, but defense in depth). 10
+    // failures/round is already pessimistic; 20-capacity, 0.5/s refill
+    // lets a real codec-cascade through without throttling.
+    if (!rateOk(c, "round:videoFailed", 20, 0.5)) return;
     const m = c?.matchId && matches.get(c.matchId);
     if (!m) return;
     // Also serve alternates during the RESULT replay so a failed result-page
@@ -1391,10 +1553,13 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("guess", ({ animeId, guessText } = {}) => {
+  socket.on("guess", async ({ animeId, guessText } = {}) => {
     const c = conns.get(socket.id);
+    // Fast typing during a heated round is legit (capacity 20, refill 5/s
+    // = 300/min sustained). Anything above that is a flood — drop.
+    if (!rateOk(c, "guess", 20, 5)) return;
     const m = c?.matchId && matches.get(c.matchId);
-    if (m) handleGuess(m, c, { animeId, guessText });
+    if (m) await handleGuess(m, c, { animeId, guessText });
   });
 
   socket.on("rematchVote", ({ yes } = {}) => {
@@ -1418,7 +1583,7 @@ io.on("connection", (socket) => {
   );
 
   // Voluntarily leave a match (e.g., user clicked "back to queue").
-  socket.on("leaveMatch", () => {
+  socket.on("leaveMatch", async () => {
     const c = conns.get(socket.id);
     const m = c?.matchId && matches.get(c.matchId);
     if (!m) return;
@@ -1437,7 +1602,7 @@ io.on("connection", (socket) => {
     ) {
       // Leaving mid-match forfeits the round — but, unlike a real disconnect,
       // the match stays alive so both can still rematch each other.
-      voluntaryForfeit(m, c);
+      await voluntaryForfeit(m, c);
     } else {
       // Leaving from the result/vote screen: the leaver goes back to the
       // lobby; the other player stays parked on the result (their choice
@@ -1464,7 +1629,21 @@ io.on("connection", (socket) => {
   });
 });
 
+// Re-run matchmaking on a tick so Elo bands widen (and bot fallback
+// fires) even when nobody is joining/leaving the queue. .unref() so
+// this timer doesn't keep the process alive on shutdown. The .catch()
+// swallows DB errors during a tick (e.g., Postgres blip) — next tick
+// just retries.
+setInterval(
+  () => tryMatch().catch((err) => console.error("matchmaker tick:", err.message)),
+  MATCHMAKER_TICK_MS
+).unref?.();
+
 server.listen(PORT, () => {
   console.log(`Anime Opening Elo (multiplayer) listening on port ${PORT}`);
-  startIngester(); // trickle-fill the opening pool in the background
+  // Fire-and-forget the ingester. .catch swallows DB blips so the listen
+  // callback doesn't print an unhandled-rejection warning during cold boot.
+  startIngester().catch((err) =>
+    console.error("startIngester:", err.message)
+  );
 });

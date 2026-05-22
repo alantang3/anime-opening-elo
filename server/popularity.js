@@ -98,7 +98,7 @@ export async function getPopularityPage(page = 1) {
         title: d?.title ?? null,
         titles: [...new Set(titles)],
       };
-      if (info.members != null) cachePopularity({ malId, ...info });
+      if (info.members != null) await cachePopularity({ malId, ...info });
       entries.push({ malId, ...info });
     }
     return { entries, hasNext: !!json?.pagination?.has_next_page };
@@ -129,7 +129,7 @@ export async function getPopularity(malId) {
     return { factor: NEUTRAL, members: null, score: null, title: null, titles: [], source: "fallback" };
   }
 
-  const cached = getCachedPopularity(malId);
+  const cached = await getCachedPopularity(malId);
   const fresh =
     cached && Date.now() - new Date(cached.fetched_at).getTime() < TTL_MS;
   if (fresh) {
@@ -148,7 +148,7 @@ export async function getPopularity(malId) {
   const p = (async () => {
     try {
       const info = await fetchJikan(malId);
-      cachePopularity({ malId, ...info });
+      await cachePopularity({ malId, ...info });
       return {
         factor: membersToFactor(info.members),
         members: info.members,

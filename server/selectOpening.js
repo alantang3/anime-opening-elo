@@ -110,10 +110,10 @@ export async function pickOpeningForElo(avgElo) {
   const minMembers = minMembersForElo(avgElo); // hard mainstream floor (low Elo)
 
   // Fast path: serve from the local pool — zero API calls, scales freely.
-  if (poolSize() >= MIN_POOL) {
+  if ((await poolSize()) >= MIN_POOL) {
     let row = null;
     for (let i = 0; i < 6; i++) {
-      const r = pickPooledOpening({ minMembers, target });
+      const r = await pickPooledOpening({ minMembers, target });
       if (!r) break;
       row = r;
       if (!recent.includes(r.animeId)) break; // prefer something not recent

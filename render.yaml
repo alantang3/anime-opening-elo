@@ -32,6 +32,13 @@ services:
       # Optional: auto-generated into DATA_DIR if left unset.
       - key: SESSION_SECRET
         sync: false
+      # Postgres connection string. Set this in the Render dashboard to
+      # your Supabase Pro pooled connection string (port 6543 for the
+      # transaction pooler; port 5432 also works but each connection
+      # counts against the project's Postgres limit). The server will
+      # refuse to boot without it.
+      - key: DATABASE_URL
+        sync: false
     disk:
       name: data
       mountPath: /var/data

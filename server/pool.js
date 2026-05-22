@@ -79,7 +79,7 @@ async function ingestPopular(entry) {
     const english = res.themes.filter((t) => isEnglishDub(t.slug, t.link));
     if (english.length) {
       for (const t of english)
-        upsertOpening({
+        await upsertOpening({
           ...common,
           themeSlug: t.slug,
           song: null,
@@ -95,7 +95,7 @@ async function ingestPopular(entry) {
   const ops = res.themes.filter((t) => !isEnglishDub(t.slug, t.link));
   const list = ops.length ? ops : res.themes;
   for (const t of list)
-    upsertOpening({
+    await upsertOpening({
       ...common,
       themeSlug: t.slug,
       song: t.song,
@@ -137,7 +137,7 @@ async function tick() {
 
   // Rescue any rows whose members were frozen NULL but are now in the cache.
   try {
-    const fixed = backfillOpeningsFromCache(membersToFactor);
+    const fixed = await backfillOpeningsFromCache(membersToFactor);
     if (fixed) console.log(`Pool backfill: fixed ${fixed} null-members row(s)`);
   } catch {
     /* never let the ingester throw */
@@ -145,12 +145,12 @@ async function tick() {
   return n > 0;
 }
 
-export function startIngester() {
+export async function startIngester() {
   if (running) return;
   running = true;
   // Immediately rescue rows poisoned before the skip-NULL fix shipped.
   try {
-    const fixed = backfillOpeningsFromCache(membersToFactor);
+    const fixed = await backfillOpeningsFromCache(membersToFactor);
     if (fixed)
       console.log(`Pool backfill (startup): fixed ${fixed} null-members row(s)`);
   } catch {
@@ -163,10 +163,10 @@ export function startIngester() {
     } catch {
       ok = false;
     }
-    const small = poolSize() < COLD_POOL;
+    const small = (await poolSize()) < COLD_POOL;
     const next = !ok ? TICK_WARM_MS : small ? TICK_COLD_MS : TICK_WARM_MS;
     setTimeout(loop, next).unref?.();
   };
-  console.log(`Opening ingester started (pool: ${poolSize()})`);
+  console.log(`Opening ingester started (pool: ${await poolSize()})`);
   loop();
 }

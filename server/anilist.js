@@ -73,19 +73,19 @@ async function fetchAnilist(malId) {
  */
 export async function getAnilistTitles(malId) {
   if (!malId) return [];
-  const cached = getCachedAnilistTitles(malId);
+  const cached = await getCachedAnilistTitles(malId);
   if (cached !== null) return cached;
   if (inflight.has(malId)) return inflight.get(malId);
   const p = (async () => {
     try {
       const titles = await fetchAnilist(malId);
-      cacheAnilistTitles(malId, titles);
+      await cacheAnilistTitles(malId, titles);
       return titles;
     } catch {
       // Cache empty on failure to suppress retry storms. If the row
       // doesn't exist yet (no Jikan record), don't cache — let a later
       // Jikan fetch create the row first.
-      cacheAnilistTitles(malId, []);
+      await cacheAnilistTitles(malId, []);
       return [];
     } finally {
       inflight.delete(malId);

@@ -61,9 +61,9 @@ export function verifySession(token) {
   }
 }
 
-function finishLogin(profile) {
+async function finishLogin(profile) {
   if (!profile?.sub) throw new Error("invalid Google profile");
-  const player = getOrCreateGooglePlayer({
+  const player = await getOrCreateGooglePlayer({
     sub: profile.sub,
     name: profile.name,
     email: profile.email,
@@ -75,7 +75,7 @@ function finishLogin(profile) {
 // Verify a Google ID token (GIS credential flow) → { token, player }.
 export async function loginWithGoogle(idToken) {
   if (!idToken) throw new Error("missing Google credential");
-  return finishLogin(await verifyGoogleIdToken(idToken));
+  return await finishLogin(await verifyGoogleIdToken(idToken));
 }
 
 // Verify a Google OAuth access token (token flow, used by our own custom
@@ -109,5 +109,5 @@ export function __setAccessTokenResolverForTests(fn) {
 
 export async function loginWithGoogleAccessToken(accessToken) {
   if (!accessToken) throw new Error("missing access token");
-  return finishLogin(await resolveAccessToken(accessToken));
+  return await finishLogin(await resolveAccessToken(accessToken));
 }

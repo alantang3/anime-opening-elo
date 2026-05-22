@@ -1,20 +1,28 @@
-// SQLite persistence. Synchronous (better-sqlite3) — fine for a single
-// Node process serving many concurrent socket players.
+// Postgres persistence (was SQLite/better-sqlite3 in earlier versions).
+// Driven by DATABASE_URL — Supabase, Render PG, local Docker, all
+// accept the same connection-string format.
 //
-// Schema is deliberately account-ready: `players` keys on a guest UUID
-// today, but carries nullable email/password_hash/auth_provider columns so
-// real logins can be added later without a migration of the hot path.
+// All exports are ASYNC because pg is wire-protocol — there's no
+// synchronous client. Callers must `await`. The Tier 2 migration touched
+// every callsite to add awaits; see the commit that introduced this file.
+//
+// Schema lives in server/migrations/001_init.sql. Run it ONCE against a
+// fresh database before booting:
+//   psql "$DATABASE_URL" -f server/migrations/001_init.sql
+// (or paste into Supabase SQL editor). Existing SQLite data can be
+// pushed up via server/scripts/import-from-sqlite.js.
 
-import Database from "better-sqlite3";
+import pg from "pg";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// On a host with a persistent disk, set DATA_DIR to the mounted volume path
-// (see render.yaml) so the SQLite file survives redeploys. Defaults to a
-// local ./data dir for development.
+// DATA_DIR still exists — auth.js writes the session secret here, and the
+// avatar directory still lives on disk until Phase 2 (object storage).
+// On Render, DATA_DIR is the mounted persistent volume; locally it's
+// ./data alongside this file.
 export const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(__dirname, "data");
@@ -23,357 +31,167 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 export const DEFAULT_ELO = 100; // everyone starts at the floor
 export const ELO_FLOOR = 100; // and can never drop below it
 
-const db = new Database(path.join(DATA_DIR, "elo.db"));
-db.pragma("journal_mode = WAL"); // better concurrent read/write behavior
-db.pragma("foreign_keys = ON");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS players (
-    id            TEXT PRIMARY KEY,          -- guest UUID (or future account id)
-    nickname      TEXT NOT NULL,
-    elo           REAL NOT NULL DEFAULT ${DEFAULT_ELO},
-    wins          INTEGER NOT NULL DEFAULT 0,
-    losses        INTEGER NOT NULL DEFAULT 0,
-    draws         INTEGER NOT NULL DEFAULT 0,  -- double-timeout = draw (both lose elo)
-    created_at    TEXT NOT NULL,
-    last_seen     TEXT NOT NULL,
-    -- reserved for when guests become accounts; all nullable, unused for now
-    email         TEXT,
-    password_hash TEXT,
-    auth_provider TEXT
+if (!process.env.DATABASE_URL) {
+  throw new Error(
+    "DATABASE_URL is not set. Provision a Postgres database (Supabase Pro " +
+    "in production) and put the connection string in DATABASE_URL. Then " +
+    "run: psql \"$DATABASE_URL\" -f server/migrations/001_init.sql"
   );
-
-  CREATE TABLE IF NOT EXISTS mal_popularity (
-    mal_id     INTEGER PRIMARY KEY,
-    members    INTEGER,
-    score      REAL,
-    title      TEXT,
-    titles     TEXT,                            -- JSON: all MAL title variants
-    fetched_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS match_history (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    played_at         TEXT NOT NULL,
-    anime_name        TEXT,
-    mal_id            INTEGER,
-    outcome           TEXT NOT NULL,          -- 'win' | 'timeout' | 'disconnect'
-    winner_id         TEXT,                   -- null on timeout (no winner)
-    loser_id          TEXT,
-    winner_elo_before REAL,
-    winner_elo_after  REAL,
-    loser_elo_before  REAL,
-    loser_elo_after   REAL,
-    duration_ms       INTEGER
-  );
-
-  -- Pre-built, ready-to-serve openings. A round picks from here with a
-  -- single local query (zero API calls); a background ingester fills it.
-  CREATE TABLE IF NOT EXISTS openings (
-    anime_id     INTEGER NOT NULL,
-    theme_slug   TEXT NOT NULL,           -- OP1, OP1-EN, …
-    anime_slug   TEXT,
-    anime_name   TEXT,
-    year         INTEGER,
-    song         TEXT,
-    video_link   TEXT NOT NULL,
-    mal_id       INTEGER,
-    members      INTEGER,                 -- MAL members (popularity gate)
-    score        REAL,
-    factor       REAL NOT NULL,           -- 0 popular … 1 obscure
-    franchise    TEXT,
-    franchise_key TEXT,
-    accepted     TEXT,                    -- JSON array of accepted answers
-    dub_label    TEXT,                    -- set when this is an English dub
-    updated_at   TEXT NOT NULL,
-    PRIMARY KEY (anime_id, theme_slug)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_players_elo ON players(elo DESC);
-  CREATE INDEX IF NOT EXISTS idx_openings_members ON openings(members);
-  CREATE INDEX IF NOT EXISTS idx_openings_factor ON openings(factor);
-`);
-
-// Lightweight migrations for DBs created before a column existed.
-// `CREATE TABLE IF NOT EXISTS` won't add columns to an existing table.
-function ensureColumn(table, column, type) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!cols.some((c) => c.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-  }
-}
-ensureColumn("mal_popularity", "titles", "TEXT");
-ensureColumn("mal_popularity", "anilist_titles", "TEXT");
-ensureColumn("players", "google_sub", "TEXT"); // Google account id (stable)
-ensureColumn("players", "avatar", "TEXT");
-ensureColumn("players", "avatar_is_custom", "INTEGER"); // user-uploaded pic
-ensureColumn("players", "peak_elo", "REAL"); // highest Elo ever reached
-ensureColumn("openings", "audio_link", "TEXT"); // direct .ogg song (preferred)
-// Snapshot the opponent's display name on the match row. Necessary for bot
-// opponents — bots have no DB row, so the LEFT JOIN to players returns NULL
-// and the history used to fall back to the literal string "Bot", which
-// tipped players off. Now we record the bot's plausible-handle name at
-// insert time so it reads exactly like a human opponent.
-ensureColumn("match_history", "winner_name", "TEXT");
-ensureColumn("match_history", "loser_name", "TEXT");
-db.exec(`UPDATE players SET peak_elo = elo WHERE peak_elo IS NULL`);
-db.exec(
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_google
-     ON players(google_sub) WHERE google_sub IS NOT NULL`
-);
-
-// One-time opt-in reset: set RESET_ELO=1 to wipe every existing account's
-// rating/record back to the floor (then remove the env var). Useful after a
-// tuning change so old accounts aren't stuck on ratings from the old system.
-// peak_elo is reset too — otherwise it keeps the old high (it only ratchets
-// up via MAX(...) on save) and the profile still shows the original peak.
-if (process.env.RESET_ELO === "1") {
-  const n = db
-    .prepare(
-      `UPDATE players
-          SET elo = ${DEFAULT_ELO}, peak_elo = ${DEFAULT_ELO},
-              wins = 0, losses = 0, draws = 0`
-    )
-    .run().changes;
-  console.log(`RESET_ELO: reset ${n} player(s) to ${DEFAULT_ELO} Elo`);
 }
 
-// One-time opt-in: set RESET_POOL=1 to wipe the openings pool (then remove
-// the env var). The ingester rebuilds it from scratch in popularity order,
-// so this clears stale rows left by the old random-sampling fill.
-if (process.env.RESET_POOL === "1") {
-  const n = db.prepare(`DELETE FROM openings`).run().changes;
-  console.log(`RESET_POOL: cleared ${n} pooled opening(s)`);
-}
+// Pool sized conservatively — Supabase Pro caps at ~60 direct connections.
+// With multi-process (Path B Phase 5) each process owns its own pool, so
+// max=10 leaves headroom for ~6 processes. If you hit "too many clients",
+// either lower this, use the Supabase pooler URL (port 6543), or upgrade.
+export const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: Number(process.env.PG_POOL_MAX) || 10,
+  // Supabase requires TLS but uses a self-signed cert in some configs;
+  // rejectUnauthorized=false matches the standard Supabase recipe.
+  ssl:
+    process.env.PG_SSL === "off"
+      ? false
+      : { rejectUnauthorized: false },
+});
+
+// Surface pool errors instead of letting them crash silently — a stale
+// connection in the pool would otherwise emit an uncaught error.
+pool.on("error", (err) => {
+  console.error("pg pool error:", err.message);
+});
 
 const nowISO = () => new Date().toISOString();
 
-const stmt = {
-  getPlayer: db.prepare(`SELECT * FROM players WHERE id = ?`),
-  insertPlayer: db.prepare(`
-    INSERT INTO players (id, nickname, elo, created_at, last_seen)
-    VALUES (@id, @nickname, @elo, @now, @now)
-  `),
-  touchPlayer: db.prepare(`
-    UPDATE players SET nickname = @nickname, last_seen = @now WHERE id = @id
-  `),
-  setRecord: db.prepare(`
-    UPDATE players
-       SET elo = @elo, wins = @wins, losses = @losses, draws = @draws,
-           peak_elo = MAX(COALESCE(peak_elo, elo), @elo),
-           last_seen = @now
-     WHERE id = @id
-  `),
-  setCustomAvatar: db.prepare(`
-    UPDATE players SET avatar = @avatar, avatar_is_custom = 1 WHERE id = @id
-  `),
-  recentMatches: db.prepare(`
-    SELECT h.played_at, h.anime_name, h.outcome, h.duration_ms,
-           h.winner_id, h.loser_id,
-           h.winner_elo_after, h.loser_elo_after,
-           h.winner_elo_before, h.loser_elo_before,
-           -- Prefer the snapshotted name (works for bots, which have no
-           -- players row). Fall back to the current player nickname for
-           -- old rows inserted before the columns existed.
-           COALESCE(h.winner_name, wp.nickname) AS winner_name,
-           COALESCE(h.loser_name,  lp.nickname) AS loser_name
-      FROM match_history h
-      LEFT JOIN players wp ON wp.id = h.winner_id
-      LEFT JOIN players lp ON lp.id = h.loser_id
-     WHERE h.winner_id = @id OR h.loser_id = @id
-     ORDER BY h.id DESC
-     LIMIT @limit
-  `),
-  avgGuessMs: db.prepare(`
-    SELECT AVG(duration_ms) AS avg
-      FROM match_history
-     WHERE winner_id = @id AND outcome = 'win' AND duration_ms > 0
-  `),
-  topPlayers: db.prepare(`
-    SELECT id, nickname, elo, wins, losses, draws, avatar
-      FROM players
-     ORDER BY elo DESC
-     LIMIT ?
-  `),
-  getPop: db.prepare(`SELECT * FROM mal_popularity WHERE mal_id = ?`),
-  upsertPop: db.prepare(`
-    INSERT INTO mal_popularity (mal_id, members, score, title, titles, fetched_at)
-    VALUES (@mal_id, @members, @score, @title, @titles, @now)
-    ON CONFLICT(mal_id) DO UPDATE SET
-      members = @members, score = @score, title = @title,
-      titles = @titles, fetched_at = @now
-  `),
-  // AniList titles cache lives in the SAME mal_popularity row, but is
-  // updated independently so a fresh AniList fetch doesn't reset the
-  // Jikan fetched_at (and vice versa). The empty-row case (AniList fetch
-  // arriving before any Jikan fetch for this id) creates a placeholder
-  // row carrying only anilist_titles + a sentinel fetched_at; a later
-  // Jikan call will populate the rest via upsertPop's ON CONFLICT.
-  getAnilist: db.prepare(`SELECT anilist_titles FROM mal_popularity WHERE mal_id = ?`),
-  upsertAnilist: db.prepare(`
-    INSERT INTO mal_popularity (mal_id, anilist_titles, fetched_at)
-    VALUES (@mal_id, @titles, @now)
-    ON CONFLICT(mal_id) DO UPDATE SET
-      anilist_titles = @titles
-  `),
-  getByGoogle: db.prepare(`SELECT * FROM players WHERE google_sub = ?`),
-  insertGuest: db.prepare(`
-    INSERT INTO players
-      (id, nickname, elo, created_at, last_seen, auth_provider, avatar)
-    VALUES
-      (@id, @nickname, @elo, @now, @now, 'guest', @avatar)
-  `),
-  insertGoogle: db.prepare(`
-    INSERT INTO players
-      (id, nickname, elo, created_at, last_seen,
-       email, auth_provider, google_sub, avatar)
-    VALUES
-      (@id, @nickname, @elo, @now, @now,
-       @email, 'google', @google_sub, @avatar)
-  `),
-  // Re-login refreshes avatar/email only — NEVER nickname, so a custom
-  // username the player chose isn't overwritten by their Google name.
-  touchGoogle: db.prepare(`
-    UPDATE players
-       SET avatar = CASE WHEN avatar_is_custom = 1 THEN avatar ELSE @avatar END,
-           email = @email, last_seen = @now
-     WHERE id = @id
-  `),
-  setNickname: db.prepare(`
-    UPDATE players SET nickname = @nickname, last_seen = @now WHERE id = @id
-  `),
-  insertMatch: db.prepare(`
-    INSERT INTO match_history
-      (played_at, anime_name, mal_id, outcome, winner_id, loser_id,
-       winner_name, loser_name,
-       winner_elo_before, winner_elo_after, loser_elo_before, loser_elo_after,
-       duration_ms)
-    VALUES
-      (@played_at, @anime_name, @mal_id, @outcome, @winner_id, @loser_id,
-       @winner_name, @loser_name,
-       @winner_elo_before, @winner_elo_after, @loser_elo_before,
-       @loser_elo_after, @duration_ms)
-  `),
-  upsertOpening: db.prepare(`
-    INSERT INTO openings
-      (anime_id, theme_slug, anime_slug, anime_name, year, song, video_link,
-       audio_link, mal_id, members, score, factor, franchise, franchise_key,
-       accepted, dub_label, updated_at)
-    VALUES
-      (@anime_id, @theme_slug, @anime_slug, @anime_name, @year, @song,
-       @video_link, @audio_link, @mal_id, @members, @score, @factor,
-       @franchise, @franchise_key, @accepted, @dub_label, @now)
-    ON CONFLICT(anime_id, theme_slug) DO UPDATE SET
-      video_link=@video_link, audio_link=@audio_link, mal_id=@mal_id,
-      members=@members, score=@score, factor=@factor, franchise=@franchise,
-      franchise_key=@franchise_key, accepted=@accepted,
-      dub_label=@dub_label, anime_name=@anime_name, song=@song,
-      year=@year, updated_at=@now
-  `),
-  countOpenings: db.prepare(`SELECT COUNT(*) AS n FROM openings`),
-  // Selection is weighted by SHOW, not by opening: a band of distinct anime
-  // (those clearing the members floor, closest to the difficulty target),
-  // which the caller picks uniformly from and then draws ONE random OP of —
-  // so a 9-OP show isn't 9× likelier than a 2-OP show.
-  bandAnimeByFloor: db.prepare(`
-    SELECT anime_id, MIN(factor) AS factor
-      FROM openings
-     WHERE members >= @minMembers
-     GROUP BY anime_id
-     ORDER BY ABS(MIN(factor) - @target) ASC
-     LIMIT @limit
-  `),
-  // Fallback when no show clears the floor: the most popular shows we have.
-  mostPopularAnime: db.prepare(`
-    SELECT anime_id
-      FROM openings
-     GROUP BY anime_id
-     ORDER BY MAX(members) DESC
-     LIMIT @limit
-  `),
-  randomOpeningOfAnime: db.prepare(`
-    SELECT * FROM openings
-     WHERE anime_id = @animeId AND members >= @minMembers
-     ORDER BY RANDOM() LIMIT 1
-  `),
-  // Pool rows whose members froze NULL but whose show is now known in the
-  // popularity cache (a later pull succeeded for that mal_id).
-  nullMemberOpenings: db.prepare(`
-    SELECT o.anime_id AS anime_id, o.theme_slug AS theme_slug,
-           p.members AS members, p.score AS score
-      FROM openings o
-      JOIN mal_popularity p ON p.mal_id = o.mal_id
-     WHERE o.members IS NULL AND p.members IS NOT NULL
-  `),
-  setOpeningPop: db.prepare(`
-    UPDATE openings SET members=@members, score=@score, factor=@factor
-     WHERE anime_id=@anime_id AND theme_slug=@theme_slug
-  `),
-};
+// Thin wrapper: pg returns { rows }. Most call sites just want rows[0]
+// or rows. These two helpers cut boilerplate without hiding the driver.
+const q = (text, params) => pool.query(text, params);
+const qOne = async (text, params) => (await q(text, params)).rows[0] || null;
 
-// Look up (or create) the account for a verified Google profile, keyed by
-// the stable Google `sub`. Refreshes display name + avatar each sign-in.
-export function getOrCreateGooglePlayer({ sub, name, email, picture }) {
+// One-shot env flags — same as the SQLite version. RESET_ELO and
+// RESET_POOL are bootstrap conveniences for after tuning changes;
+// remove the env var after a single boot.
+if (process.env.RESET_ELO === "1") {
+  const r = await q(
+    `UPDATE players SET elo = $1, peak_elo = $1, wins = 0, losses = 0, draws = 0`,
+    [DEFAULT_ELO]
+  );
+  console.log(`RESET_ELO: reset ${r.rowCount} player(s) to ${DEFAULT_ELO} Elo`);
+}
+if (process.env.RESET_POOL === "1") {
+  const r = await q(`DELETE FROM openings`);
+  console.log(`RESET_POOL: cleared ${r.rowCount} pooled opening(s)`);
+}
+
+// ---------- Player CRUD ----------
+
+export async function getPlayer(id) {
+  return qOne(`SELECT * FROM players WHERE id = $1`, [id]);
+}
+
+export async function getOrCreateGooglePlayer({ sub, name, email, picture }) {
   const now = nowISO();
   const nickname = String(name || email || "Player").trim().slice(0, 24);
   const avatar = picture || null;
-  const existing = stmt.getByGoogle.get(sub);
+  const existing = await qOne(
+    `SELECT * FROM players WHERE google_sub = $1`,
+    [sub]
+  );
   if (existing) {
-    stmt.touchGoogle.run({ id: existing.id, avatar, email: email || null, now });
-    return stmt.getByGoogle.get(sub); // re-read: keeps custom avatar/nickname
+    // Re-login refreshes avatar/email only — NEVER nickname. A custom
+    // username chosen by the player isn't overwritten by their Google name.
+    await q(
+      `UPDATE players
+          SET avatar = CASE WHEN avatar_is_custom = 1 THEN avatar ELSE $1 END,
+              email = $2, last_seen = $3
+        WHERE id = $4`,
+      [avatar, email || null, now, existing.id]
+    );
+    return qOne(`SELECT * FROM players WHERE google_sub = $1`, [sub]);
   }
   const id = crypto.randomUUID();
-  stmt.insertGoogle.run({
-    id, nickname, elo: DEFAULT_ELO, now,
-    email: email || null, google_sub: sub, avatar,
-  });
-  return stmt.getByGoogle.get(sub);
+  await q(
+    `INSERT INTO players
+       (id, nickname, elo, created_at, last_seen, email, auth_provider, google_sub, avatar)
+     VALUES ($1, $2, $3, $4, $4, $5, 'google', $6, $7)`,
+    [id, nickname, DEFAULT_ELO, now, email || null, sub, avatar]
+  );
+  return qOne(`SELECT * FROM players WHERE google_sub = $1`, [sub]);
 }
 
-// Create a brand-new guest account (no Google auth, no email). The nickname
-// is whatever the user typed in the guest modal; avatar is the URL of any
-// uploaded pfp, or null (the client falls back to /default.png). Returns the
-// row so the caller can issue a session.
-export function createGuestPlayer({ nickname, avatar }) {
+export async function createGuestPlayer({ nickname, avatar }) {
   const clean =
     String(nickname || "").replace(/\s+/g, " ").trim().slice(0, 24) || "Guest";
   const id = crypto.randomUUID();
   const now = nowISO();
-  stmt.insertGuest.run({
-    id,
-    nickname: clean,
-    elo: DEFAULT_ELO,
-    now,
-    avatar: avatar || null,
-  });
-  return stmt.getPlayer.get(id);
+  await q(
+    `INSERT INTO players
+       (id, nickname, elo, created_at, last_seen, auth_provider, avatar)
+     VALUES ($1, $2, $3, $4, $4, 'guest', $5)`,
+    [id, clean, DEFAULT_ELO, now, avatar || null]
+  );
+  return getPlayer(id);
 }
 
-// Set a player's chosen display name. Returns the updated row (or null).
-export function setNickname(id, nickname) {
+export async function setNickname(id, nickname) {
   const clean = String(nickname || "").replace(/\s+/g, " ").trim().slice(0, 24);
   if (clean.length < 2) return null;
-  stmt.setNickname.run({ id, nickname: clean, now: nowISO() });
-  return stmt.getPlayer.get(id);
+  await q(
+    `UPDATE players SET nickname = $1, last_seen = $2 WHERE id = $3`,
+    [clean, nowISO(), id]
+  );
+  return getPlayer(id);
 }
 
-export function getPlayer(id) {
-  return stmt.getPlayer.get(id);
+export async function setCustomAvatar(id, avatarPath) {
+  await q(
+    `UPDATE players SET avatar = $1, avatar_is_custom = 1 WHERE id = $2`,
+    [avatarPath, id]
+  );
+  return getPlayer(id);
 }
 
-export function setCustomAvatar(id, avatarPath) {
-  stmt.setCustomAvatar.run({ id, avatar: avatarPath });
-  return stmt.getPlayer.get(id);
+// ---------- Stats / leaderboard ----------
+
+export async function leaderboard(limit = 20) {
+  const r = await q(
+    `SELECT id, nickname, elo, wins, losses, draws, avatar
+       FROM players
+      ORDER BY elo DESC
+      LIMIT $1`,
+    [limit]
+  );
+  return r.rows.map((p) => ({ ...p, elo: Math.round(p.elo) }));
 }
 
-// Aggregate stats + recent matches for one player, from the player's own
-// perspective (win/loss, Elo delta, opponent).
-export function getPlayerStats(id, limit = 12) {
-  const p = stmt.getPlayer.get(id);
+export async function getPlayerStats(id, limit = 12) {
+  const p = await getPlayer(id);
   if (!p) return null;
   const games = p.wins + p.losses + p.draws;
-  const avgRow = stmt.avgGuessMs.get({ id });
-  const recent = stmt.recentMatches.all({ id, limit }).map((m) => {
+  const avgRow = await qOne(
+    `SELECT AVG(duration_ms) AS avg
+       FROM match_history
+      WHERE winner_id = $1 AND outcome = 'win' AND duration_ms > 0`,
+    [id]
+  );
+  // recentMatches: filtered by (winner_id = $1 OR loser_id = $1). The
+  // (winner_id, id DESC) and (loser_id, id DESC) indexes let Postgres
+  // BitmapOr the two index scans instead of full-scanning the table.
+  const r = await q(
+    `SELECT h.played_at, h.anime_name, h.outcome, h.duration_ms,
+            h.winner_id, h.loser_id,
+            h.winner_elo_after, h.loser_elo_after,
+            h.winner_elo_before, h.loser_elo_before,
+            COALESCE(h.winner_name, wp.nickname) AS winner_name,
+            COALESCE(h.loser_name,  lp.nickname) AS loser_name
+       FROM match_history h
+       LEFT JOIN players wp ON wp.id = h.winner_id
+       LEFT JOIN players lp ON lp.id = h.loser_id
+      WHERE h.winner_id = $1 OR h.loser_id = $1
+      ORDER BY h.id DESC
+      LIMIT $2`,
+    [id, limit]
+  );
+  const recent = r.rows.map((m) => {
     const won = m.winner_id === id;
     const isTimeout = m.outcome === "timeout";
     const before = won ? m.winner_elo_before : m.loser_elo_before;
@@ -384,10 +202,9 @@ export function getPlayerStats(id, limit = 12) {
       anime: m.anime_name,
       outcome: m.outcome,
       youWon: isTimeout ? false : won,
-      // New rows always have a snapshotted opponent name (including the bot's
-      // plausible handle, e.g. "kuro_92"). Old rows pre-column that opposed a
-      // bot have NULL here — fall back to a neutral placeholder, NOT "Bot",
-      // since that gives the game away.
+      // Old SQLite rows pre-snapshot-columns may have NULL opponent
+      // names. Fall back to a neutral placeholder (NOT "Bot" — that
+      // would give the game away on a bot-played row).
       opponent: oppName || "Unknown",
       eloAfter: after != null ? Math.round(after) : null,
       delta:
@@ -405,87 +222,149 @@ export function getPlayerStats(id, limit = 12) {
     draws: p.draws,
     games,
     winrate: games ? Math.round((p.wins / games) * 100) : 0,
-    avgGuessMs: avgRow?.avg ? Math.round(avgRow.avg) : null,
+    avgGuessMs: avgRow?.avg ? Math.round(Number(avgRow.avg)) : null,
     recent,
   };
 }
 
-// Apply one finished round atomically: both players' new elo + W/L/D and a
-// history row. `outcome` is 'win'/'disconnect' (winner+loser) or 'timeout'
-// (no winner — both took `loser`-style losses, recorded as a draw each).
-export const applyMatchResult = db.transaction((r) => {
+// ---------- Match result (transactional) ----------
+// Two UPDATEs to players + one INSERT into match_history, wrapped in a
+// transaction so a crash mid-write can't leave the players table updated
+// without a corresponding history row (or vice versa).
+export async function applyMatchResult(r) {
+  const client = await pool.connect();
   const now = nowISO();
+  try {
+    await client.query("BEGIN");
 
-  if (r.outcome === "timeout") {
-    for (const p of [r.a, r.b]) {
-      stmt.setRecord.run({
-        id: p.id, elo: p.eloAfter,
-        wins: p.wins, losses: p.losses, draws: p.draws + 1, now,
-      });
+    if (r.outcome === "timeout") {
+      for (const p of [r.a, r.b]) {
+        await client.query(
+          `UPDATE players
+              SET elo = $1, wins = $2, losses = $3, draws = $4,
+                  peak_elo = GREATEST(COALESCE(peak_elo, elo), $1),
+                  last_seen = $5
+            WHERE id = $6`,
+          [p.eloAfter, p.wins, p.losses, p.draws + 1, now, p.id]
+        );
+      }
+      // Both participants are stored in winner_id/loser_id (arbitrary
+      // which side); the recent-matches query filters by
+      // winner_id|loser_id so it picks the draw up in both histories.
+      // outcome === "timeout" tells the client to render it as DRAW
+      // regardless of which side ended up in the "winner" column.
+      await client.query(
+        `INSERT INTO match_history
+           (played_at, anime_name, mal_id, outcome,
+            winner_id, loser_id, winner_name, loser_name,
+            winner_elo_before, winner_elo_after,
+            loser_elo_before, loser_elo_after, duration_ms)
+         VALUES ($1, $2, $3, 'timeout',
+                 $4, $5, $6, $7,
+                 $8, $9, $10, $11, $12)`,
+        [
+          now, r.animeName, r.malId,
+          r.a.id, r.b.id, r.a.nickname || null, r.b.nickname || null,
+          r.a.eloBefore ?? null, r.a.eloAfter,
+          r.b.eloBefore ?? null, r.b.eloAfter,
+          r.durationMs,
+        ]
+      );
+      await client.query("COMMIT");
+      return;
     }
-    // Store both participants in winner_id/loser_id (arbitrary which side)
-    // so the recent-matches query (filtered by winner_id|loser_id) actually
-    // picks the draw up in both players' histories. The client uses
-    // outcome === "timeout" to render this as DRAW regardless of which
-    // player landed in the "winner" column.
-    stmt.insertMatch.run({
-      played_at: now, anime_name: r.animeName, mal_id: r.malId,
-      outcome: "timeout",
-      winner_id: r.a.id, loser_id: r.b.id,
-      winner_name: r.a.nickname || null, loser_name: r.b.nickname || null,
-      winner_elo_before: r.a.eloBefore ?? null, winner_elo_after: r.a.eloAfter,
-      loser_elo_before: r.b.eloBefore ?? null,  loser_elo_after: r.b.eloAfter,
-      duration_ms: r.durationMs,
-    });
-    return;
-  }
 
-  // A voluntary forfeit is a "no contest" for the non-forfeit side: their
-  // Elo and W/L are unchanged (no wins-counter farm) while the forfeiter
-  // takes a real loss. resolveWin already zeroed out winnerGain so their
-  // eloAfter equals eloBefore here.
-  const isForfeit = r.outcome === "forfeit";
-  if (!isForfeit) {
-    stmt.setRecord.run({
-      id: r.winner.id, elo: r.winner.eloAfter,
-      wins: r.winner.wins + 1, losses: r.winner.losses,
-      draws: r.winner.draws, now,
-    });
+    // A voluntary forfeit is a "no contest" for the non-forfeit side:
+    // their Elo and W/L are unchanged (no wins-counter farm) while the
+    // forfeiter takes a real loss. resolveWin already zeroed winnerGain
+    // so eloAfter equals eloBefore here, but we still skip the UPDATE
+    // entirely so the wins counter doesn't tick up.
+    const isForfeit = r.outcome === "forfeit";
+    if (!isForfeit) {
+      await client.query(
+        `UPDATE players
+            SET elo = $1, wins = $2, losses = $3, draws = $4,
+                peak_elo = GREATEST(COALESCE(peak_elo, elo), $1),
+                last_seen = $5
+          WHERE id = $6`,
+        [r.winner.eloAfter, r.winner.wins + 1, r.winner.losses,
+         r.winner.draws, now, r.winner.id]
+      );
+    }
+    await client.query(
+      `UPDATE players
+          SET elo = $1, wins = $2, losses = $3, draws = $4,
+              peak_elo = GREATEST(COALESCE(peak_elo, elo), $1),
+              last_seen = $5
+        WHERE id = $6`,
+      [r.loser.eloAfter, r.loser.wins, r.loser.losses + 1,
+       r.loser.draws, now, r.loser.id]
+    );
+    await client.query(
+      `INSERT INTO match_history
+         (played_at, anime_name, mal_id, outcome,
+          winner_id, loser_id, winner_name, loser_name,
+          winner_elo_before, winner_elo_after,
+          loser_elo_before, loser_elo_after, duration_ms)
+       VALUES ($1, $2, $3, $4,
+               $5, $6, $7, $8,
+               $9, $10, $11, $12, $13)`,
+      [
+        now, r.animeName, r.malId, r.outcome,
+        r.winner.id, r.loser.id,
+        r.winner.nickname || null, r.loser.nickname || null,
+        r.winner.eloBefore, r.winner.eloAfter,
+        r.loser.eloBefore, r.loser.eloAfter,
+        r.durationMs,
+      ]
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
   }
-  stmt.setRecord.run({
-    id: r.loser.id, elo: r.loser.eloAfter,
-    wins: r.loser.wins, losses: r.loser.losses + 1,
-    draws: r.loser.draws, now,
-  });
-  stmt.insertMatch.run({
-    played_at: now, anime_name: r.animeName, mal_id: r.malId,
-    outcome: r.outcome, winner_id: r.winner.id, loser_id: r.loser.id,
-    winner_name: r.winner.nickname || null,
-    loser_name: r.loser.nickname || null,
-    winner_elo_before: r.winner.eloBefore, winner_elo_after: r.winner.eloAfter,
-    loser_elo_before: r.loser.eloBefore, loser_elo_after: r.loser.eloAfter,
-    duration_ms: r.durationMs,
-  });
-});
-
-export function leaderboard(limit = 20) {
-  return stmt.topPlayers.all(limit).map((p) => ({
-    ...p,
-    elo: Math.round(p.elo),
-  }));
 }
 
-export function getCachedPopularity(malId) {
-  return stmt.getPop.get(malId) || null;
+// ---------- Popularity cache ----------
+
+export async function getCachedPopularity(malId) {
+  return qOne(`SELECT * FROM mal_popularity WHERE mal_id = $1`, [malId]);
 }
 
-// AniList titles cache, keyed by MAL id (we always know mal id, AniList's
-// own ID is derived). Returns the array if cached (even an empty cached
-// array — that's a "no AniList data" sentinel, distinct from null which
-// means "never fetched"). Cached forever; AniList data changes rarely
-// and is augmentative anyway.
-export function getCachedAnilistTitles(malId) {
-  const row = stmt.getAnilist.get(malId);
+export async function cachePopularity({ malId, members, score, title, titles }) {
+  await q(
+    `INSERT INTO mal_popularity (mal_id, members, score, title, titles, fetched_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (mal_id) DO UPDATE SET
+       members = EXCLUDED.members,
+       score = EXCLUDED.score,
+       title = EXCLUDED.title,
+       titles = EXCLUDED.titles,
+       fetched_at = EXCLUDED.fetched_at`,
+    [
+      malId,
+      members ?? null,
+      score ?? null,
+      title ?? null,
+      titles && titles.length ? JSON.stringify(titles) : null,
+      nowISO(),
+    ]
+  );
+}
+
+// AniList titles cache lives in the SAME mal_popularity row but is
+// updated independently so a fresh AniList fetch doesn't reset the Jikan
+// fetched_at (and vice versa). The empty-row case (AniList arriving
+// before any Jikan fetch for this id) creates a placeholder row with
+// only anilist_titles + sentinel fetched_at; a later Jikan call
+// upserts the rest.
+export async function getCachedAnilistTitles(malId) {
+  const row = await qOne(
+    `SELECT anilist_titles FROM mal_popularity WHERE mal_id = $1`,
+    [malId]
+  );
   if (!row || row.anilist_titles == null) return null;
   try {
     const a = JSON.parse(row.anilist_titles);
@@ -495,70 +374,105 @@ export function getCachedAnilistTitles(malId) {
   }
 }
 
-export function cacheAnilistTitles(malId, titles) {
-  stmt.upsertAnilist.run({
-    mal_id: malId,
-    titles: JSON.stringify(titles || []),
-    now: new Date().toISOString(),
-  });
-}
-
-export function cachePopularity({ malId, members, score, title, titles }) {
-  stmt.upsertPop.run({
-    mal_id: malId,
-    members: members ?? null,
-    score: score ?? null,
-    title: title ?? null,
-    titles: titles && titles.length ? JSON.stringify(titles) : null,
-    now: nowISO(),
-  });
+export async function cacheAnilistTitles(malId, titles) {
+  await q(
+    `INSERT INTO mal_popularity (mal_id, anilist_titles, fetched_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (mal_id) DO UPDATE SET
+       anilist_titles = EXCLUDED.anilist_titles`,
+    [malId, JSON.stringify(titles || []), nowISO()]
+  );
 }
 
 // ---------- Opening pool ----------
-export function upsertOpening(row) {
-  stmt.upsertOpening.run({
-    anime_id: row.animeId,
-    theme_slug: row.themeSlug,
-    anime_slug: row.animeSlug ?? null,
-    anime_name: row.animeName ?? null,
-    year: row.year ?? null,
-    song: row.song ?? null,
-    video_link: row.videoLink,
-    audio_link: row.audioLink ?? null,
-    mal_id: row.malId ?? null,
-    members: Number.isFinite(row.members) ? row.members : null,
-    score: row.score ?? null,
-    factor: row.factor,
-    franchise: row.franchise ?? null,
-    franchise_key: row.franchiseKey ?? null,
-    accepted: row.accepted ? JSON.stringify(row.accepted) : null,
-    dub_label: row.dubLabel ?? null,
-    now: nowISO(),
-  });
+
+export async function upsertOpening(row) {
+  await q(
+    `INSERT INTO openings
+       (anime_id, theme_slug, anime_slug, anime_name, year, song, video_link,
+        audio_link, mal_id, members, score, factor, franchise, franchise_key,
+        accepted, dub_label, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+     ON CONFLICT (anime_id, theme_slug) DO UPDATE SET
+       video_link    = EXCLUDED.video_link,
+       audio_link    = EXCLUDED.audio_link,
+       mal_id        = EXCLUDED.mal_id,
+       members       = EXCLUDED.members,
+       score         = EXCLUDED.score,
+       factor        = EXCLUDED.factor,
+       franchise     = EXCLUDED.franchise,
+       franchise_key = EXCLUDED.franchise_key,
+       accepted      = EXCLUDED.accepted,
+       dub_label     = EXCLUDED.dub_label,
+       anime_name    = EXCLUDED.anime_name,
+       song          = EXCLUDED.song,
+       year          = EXCLUDED.year,
+       updated_at    = EXCLUDED.updated_at`,
+    [
+      row.animeId,
+      row.themeSlug,
+      row.animeSlug ?? null,
+      row.animeName ?? null,
+      row.year ?? null,
+      row.song ?? null,
+      row.videoLink,
+      row.audioLink ?? null,
+      row.malId ?? null,
+      Number.isFinite(row.members) ? row.members : null,
+      row.score ?? null,
+      row.factor,
+      row.franchise ?? null,
+      row.franchiseKey ?? null,
+      row.accepted ? JSON.stringify(row.accepted) : null,
+      row.dubLabel ?? null,
+      nowISO(),
+    ]
+  );
 }
 
-export function poolSize() {
-  return stmt.countOpenings.get().n;
+export async function poolSize() {
+  const r = await qOne(`SELECT COUNT(*)::int AS n FROM openings`);
+  return r?.n ?? 0;
 }
 
-// Pick a ready-to-serve opening for the given difficulty. Picks a SHOW first
-// (uniformly, from a band of distinct anime nearest the difficulty target
-// that clear the members floor), then ONE random OP of that show — so shows
-// with many openings don't dominate. Relaxes to the most popular shows if
-// none clear the floor.
-export function pickPooledOpening({ minMembers, target, band = 25 }) {
-  let animeRows = stmt.bandAnimeByFloor.all({ minMembers, target, limit: band });
+// Pick a ready-to-serve opening for the given difficulty.
+// 1) From a band of distinct anime nearest the difficulty target that
+//    clear the members floor, pick one anime uniformly.
+// 2) Of that anime's pooled OPs (still respecting the floor), pick one
+//    at random.
+// Relaxes to "the most popular shows we have" if NO show clears the
+// floor — better to serve something popular than nothing.
+export async function pickPooledOpening({ minMembers, target, band = 25 }) {
+  let { rows: animeRows } = await q(
+    `SELECT anime_id, MIN(factor) AS factor
+       FROM openings
+      WHERE members >= $1
+      GROUP BY anime_id
+      ORDER BY ABS(MIN(factor) - $2) ASC
+      LIMIT $3`,
+    [minMembers, target, band]
+  );
   let floorForPick = minMembers;
   if (!animeRows.length) {
-    animeRows = stmt.mostPopularAnime.all({ limit: band });
+    const r2 = await q(
+      `SELECT anime_id
+         FROM openings
+        GROUP BY anime_id
+        ORDER BY MAX(members) DESC NULLS LAST
+        LIMIT $1`,
+      [band]
+    );
+    animeRows = r2.rows;
     floorForPick = 0; // fallback: ignore the floor entirely
   }
   if (!animeRows.length) return null;
   const a = animeRows[Math.floor(Math.random() * animeRows.length)];
-  const r = stmt.randomOpeningOfAnime.get({
-    animeId: a.anime_id,
-    minMembers: floorForPick,
-  });
+  const r = await qOne(
+    `SELECT * FROM openings
+      WHERE anime_id = $1 AND members >= $2
+      ORDER BY RANDOM() LIMIT 1`,
+    [a.anime_id, floorForPick]
+  );
   if (!r) return null;
   return {
     animeId: r.anime_id,
@@ -580,26 +494,42 @@ export function pickPooledOpening({ minMembers, target, band = 25 }) {
   };
 }
 
-// Rescue pool rows whose `members` froze NULL (MAL was down the first time
-// that show was drawn) by copying the now-known count from the popularity
-// cache and recomputing `factor`. `membersToFactor` is passed in to avoid an
-// import cycle (popularity.js already imports this module). Returns the
-// number of rows fixed.
-export function backfillOpeningsFromCache(membersToFactor) {
-  const rows = stmt.nullMemberOpenings.all();
-  if (!rows.length) return 0;
-  const tx = db.transaction((rs) => {
-    for (const r of rs)
-      stmt.setOpeningPop.run({
-        anime_id: r.anime_id,
-        theme_slug: r.theme_slug,
-        members: r.members,
-        score: r.score,
-        factor: membersToFactor(r.members),
-      });
-  });
-  tx(rows);
-  return rows.length;
+// Rescue pool rows whose `members` froze NULL (MAL was down the first
+// time that show was drawn) by copying the now-known count from the
+// popularity cache and recomputing `factor`. `membersToFactor` is passed
+// in to avoid an import cycle (popularity.js already imports this
+// module). Returns the number of rows fixed.
+export async function backfillOpeningsFromCache(membersToFactor) {
+  const r = await q(
+    `SELECT o.anime_id, o.theme_slug, p.members, p.score
+       FROM openings o
+       JOIN mal_popularity p ON p.mal_id = o.mal_id
+      WHERE o.members IS NULL AND p.members IS NOT NULL`
+  );
+  if (!r.rows.length) return 0;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const row of r.rows) {
+      await client.query(
+        `UPDATE openings
+            SET members = $1, score = $2, factor = $3
+          WHERE anime_id = $4 AND theme_slug = $5`,
+        [
+          row.members,
+          row.score,
+          membersToFactor(row.members),
+          row.anime_id,
+          row.theme_slug,
+        ]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  return r.rows.length;
 }
-
-export default db;
