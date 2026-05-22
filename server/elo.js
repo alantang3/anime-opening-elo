@@ -38,11 +38,14 @@ const MIN_LOSS_DELTA = 2;
 // every matchup.
 const FORFEIT_MULT = 0.5;
 
-// Timeout (nobody guessed before the song ended): both players lose a flat,
-// popularity-independent penalty. Kept flat on purpose — scaling it by
-// popularity creates perverse incentives either direction, and the product
-// rule is simply "you both lose points".
-export const TIMEOUT_PENALTY = 20;
+// Draw multiplier — scales the same way LOSS and FORFEIT do (with k from
+// popularity and per-player expected score), but strictly smaller than
+// FORFEIT's effective multiplier (FORFEIT_MULT × LOSS_MULT = 0.4) so the
+// outcome ordering is ALWAYS LOSS > FORFEIT > DRAW regardless of
+// popularity or matchup. Both players take their own personal penalty:
+// a higher-Elo player loses more in a draw than a lower-Elo one,
+// because failing to ID an opening you "should have known" is worse.
+const DRAW_MULT = 0.3;
 
 const round1 = (x) => Math.round(x * 10) / 10;
 const floor = (elo) => Math.max(ELO_FLOOR, elo);
@@ -99,12 +102,21 @@ export function resolveWin(winnerElo, loserElo, popFactor, opts = {}) {
 }
 
 /**
- * Resolve a timed-out round: nobody got it before the opening ended, so both
- * players take the flat penalty (recorded as a draw each in the DB).
+ * Resolve a timed-out round: nobody got it before the opening ended.
+ * Both players lose Elo (recorded as a draw each in the DB), scaled by
+ * popularity (k) and per-player expected score — so each player loses
+ * an amount that's strictly smaller than what they'd lose in a forfeit
+ * at the same matchup. A higher-Elo player loses MORE in a draw than a
+ * lower-Elo one (they were expected to ID it; the lower-Elo one wasn't).
  */
-export function resolveTimeout(aElo, bElo) {
-  const aAfter = Math.round(floor(aElo - TIMEOUT_PENALTY));
-  const bAfter = Math.round(floor(bElo - TIMEOUT_PENALTY));
+export function resolveTimeout(aElo, bElo, popFactor) {
+  const k = effectiveK(popFactor);
+  const expA = expectedScore(aElo, bElo);
+  const expB = 1 - expA;
+  const aLoss = expA * k * DRAW_MULT;
+  const bLoss = expB * k * DRAW_MULT;
+  const aAfter = Math.round(floor(aElo - aLoss));
+  const bAfter = Math.round(floor(bElo - bLoss));
   return {
     aDelta: Math.round(aAfter - aElo),
     bDelta: Math.round(bAfter - bElo),

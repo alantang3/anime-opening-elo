@@ -755,7 +755,7 @@ async function onRoundTimeout(match) {
   if (!matches.has(match.id)) return;
   const b = await freshSnapshot(cb);
   if (!matches.has(match.id)) return;
-  const r = resolveTimeout(a.eloRaw, b.eloRaw);
+  const r = resolveTimeout(a.eloRaw, b.eloRaw, match.popularity?.factor);
 
   await applyMatchResult({
     outcome: "timeout",
