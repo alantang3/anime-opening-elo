@@ -105,18 +105,59 @@ export async function getOpeningThemes(animeSlug) {
   }
 }
 
-// Every playable media link for an anime's themes, as {video, audio}
-// pairs. Order is a fallback chain:
-//   1) SAME theme first (same OP slot — OP1's other encodes before OP2's),
-//      so we keep the song label accurate.
-//   2) Within a theme: every version (entry), highest-resolution video
-//      first per entry.
-//   3) Other OP/ED themes as last-resort (some pooled rows are ED-only
-//      for movies / OVA-only shows).
+// In-memory cache for getThemeMediaLinks, keyed by anime+theme slug
+// pair. The alt-list for a given (slug, themeSlug) doesn't change
+// match-to-match, but today the lazy on-failure fetch path calls
+// AnimeThemes again for every match that hits a failure on the same
+// show. At scale that's a real API-load problem; cached, each combo
+// hits AnimeThemes at most once per server lifetime. Stores the
+// PROMISE (not just the resolved value) so concurrent matches racing
+// the first request for the same combo dedupe into one network call.
+const themeLinksCache = new Map();
+
+/**
+ * Cached wrapper around getThemeMediaLinks. Safe to call eagerly at
+ * round-prepare — the first hit per (slug, themeSlug) goes to network,
+ * every subsequent call is a synchronous Map lookup returning the same
+ * resolved promise.
+ *
+ * @param {string} animeSlug
+ * @param {string|null} themeSlug
+ * @returns {Promise<Array<{video:string, audio:string|null}>>}
+ */
+export function getCachedThemeMediaLinks(animeSlug, themeSlug) {
+  if (!animeSlug) return Promise.resolve([]);
+  const key = `${animeSlug}::${themeSlug || ""}`;
+  let p = themeLinksCache.get(key);
+  if (!p) {
+    p = getThemeMediaLinks(animeSlug, themeSlug).catch(() => []);
+    themeLinksCache.set(key, p);
+  }
+  return p;
+}
+
+// Every playable media link for one SPECIFIC theme of an anime, as
+// {video, audio} pairs. Order is the fallback chain WITHIN that theme:
+//   - All entries (versions) of the SAME theme slug — different edits
+//     v1/v2/etc. of the same song.
+//   - Within each entry: every encoding (NC/BD/WEB/etc.), highest-
+//     resolution first.
+// Deliberately STRICT to the requested themeSlug: we never cross over
+// to OP2 if OP1 was the picked opening, because OP2 is a different song
+// — playing it would mean the result-page replay shows a different
+// track than what played during the round, which is confusing UX. If
+// all encodes of the picked theme are dead, the chain bottoms out and
+// the round voids cleanly (or, at RESULT phase, the player just sits
+// empty — the round is already settled, no Elo impact).
+//
 // Each video carries its OWN paired direct audio file (OGG/MP3) when
 // AnimeThemes has one; we ship it alongside the video so the client can
 // try the lighter audio file before the full video for each encoding.
 // De-duplicated by video link.
+//
+// themeSlug nullability: if it's missing (rare — only when we lost the
+// theme slug somehow), we fall back to all OP/ED themes of the show
+// rather than returning nothing.
 export async function getThemeMediaLinks(animeSlug, themeSlug) {
   if (!animeSlug) return [];
   try {
@@ -124,31 +165,25 @@ export async function getThemeMediaLinks(animeSlug, themeSlug) {
       `${BASE}/anime/${encodeURIComponent(animeSlug)}` +
         `?include=animethemes.animethemeentries.videos.audio`
     );
-    const themes = (data.anime?.animethemes || []).filter(
-      (t) => t.type === "OP" || t.type === "ED"
-    );
-    const linksFor = (t) => {
-      const out = [];
+    const themes = (data.anime?.animethemes || []).filter((t) => {
+      if (t.type !== "OP" && t.type !== "ED") return false;
+      // Strict same-theme: only the picked OP/ED slot. Without a slug we
+      // can't be strict, so accept any OP/ED as a degraded fallback.
+      return !themeSlug || t.slug === themeSlug;
+    });
+    const out = [];
+    const seen = new Set();
+    for (const t of themes) {
       for (const entry of t.animethemeentries || []) {
         const vids = [...(entry.videos || [])].sort(
           (a, b) => (b.resolution || 0) - (a.resolution || 0)
         );
         for (const v of vids) {
-          if (v?.link)
+          if (v?.link && !seen.has(v.link)) {
+            seen.add(v.link);
             out.push({ video: v.link, audio: v.audio?.link || null });
+          }
         }
-      }
-      return out;
-    };
-    const same = themes.filter((t) => t.slug === themeSlug).flatMap(linksFor);
-    const other = themes.filter((t) => t.slug !== themeSlug).flatMap(linksFor);
-    // Dedupe by video link while preserving order.
-    const seen = new Set();
-    const out = [];
-    for (const x of [...same, ...other]) {
-      if (!seen.has(x.video)) {
-        seen.add(x.video);
-        out.push(x);
       }
     }
     return out;

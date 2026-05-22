@@ -68,10 +68,18 @@ const RANKS = [
   { min: 3000, name: "S-Class Hero", color: "#fb5a2e" },
   { min: 3300, name: "Special Grade Sorcerer", color: "#f5356e" },
   { min: 3600, name: "Kage", color: "#e62222" },
-  { min: 3900, name: "Pirate King", color: "#c026d6" },
-  { min: 4200, name: "The Honored One", color: "#6a5cff" },
-  { min: 4500, name: "Super Saiyan", color: "#ffd23d" },
-  { min: 4800, name: "Anime God", color: "#ffffff" },
+  // Pirate King: deep crimson — a darker, richer red than Kage's bright
+  // red. Continues the red run (pink-red → bright red → deep red) and
+  // its slightly cooler tone naturally hands off to King of Curses'
+  // magenta-purple at the next tier.
+  { min: 3900, name: "Pirate King", color: "#a8131c" },
+  // King of Curses inherits the old Pirate King magenta-purple. Sits
+  // between deep red and the Honored One's blue-violet — completes the
+  // red→magenta→violet→indigo arc through the top tiers.
+  { min: 4200, name: "King of Curses", color: "#c026d6" },
+  { min: 4500, name: "The Honored One", color: "#6a5cff" },
+  { min: 4800, name: "Super Saiyan", color: "#ffd23d" },
+  { min: 5100, name: "Anime God", color: "#ffffff" },
 ];
 function rankForElo(elo) {
   let r = RANKS[0];
@@ -209,6 +217,14 @@ export default function App() {
   // retransmit arrives after we already advanced, this ref lets us skip
   // it instead of bouncing back to RESULT. Reset on matchFound.
   const lastRoundEndRef = useRef(0);
+  // Full alt-list from the server (every encode of the same OP + sibling
+  // theme encodes as last-resort), shipped via "round:altList" right
+  // after round:prepare. With this we do failure recovery LOCALLY — no
+  // server round-trip on each failure — and can also CYCLE the list once
+  // before voiding, in case the first pass hit a transient blip.
+  const altListRef = useRef([]);       // [{video, audio}, ...]
+  const altIndexRef = useRef(-1);      // -1 = playing the primary; 0+ = into alt-list
+  const altCycleRef = useRef(0);       // how many full passes through the list we've done
   // Result-page video retries: bounded high enough to walk every alternate
   // the server has (typically 5-20 URLs); the server returns null when its
   // alternate list is exhausted, which is the real termination signal. The
@@ -308,6 +324,12 @@ export default function App() {
       // to skip duplicates; reset to 0 so round 1's emit is always
       // processed.
       lastRoundEndRef.current = 0;
+      // Fresh match → fresh alt-list state. (round:prepare also clears
+      // this for every round, but reset here too in case the very first
+      // round:prepare races matchFound.)
+      altListRef.current = [];
+      altIndexRef.current = -1;
+      altCycleRef.current = 0;
       setPeerAV({ cam: false, mic: false });
       ensurePeer(); // ready to negotiate if either side enables A/V
       // Pick Kitsune's speech bubble based on the Elo gap. |diff| < 100 →
@@ -382,6 +404,11 @@ export default function App() {
       unplayableSentRef.current = false;
       resultRetriesRef.current = 0;
       altReqRef.current = false;
+      // Fresh round → drop the previous round's alt-list. The new list
+      // arrives via "round:altList" shortly after this event.
+      altListRef.current = [];
+      altIndexRef.current = -1;
+      altCycleRef.current = 0;
       clearTimeout(watchdogRef.current);
       setRoundInfo({
         round,
@@ -393,6 +420,15 @@ export default function App() {
       // While Mimiko is holding the "wait" pose, stay on the queue page;
       // the found-hold timer flips to PREPARE when it's done.
       if (!foundHoldRef.current) setPhase(PHASE.PREPARE);
+    });
+
+    // Full alt-list for this round, pushed right after round:prepare. Each
+    // entry is { video, audio } — same OP slot's other encodes first
+    // (preserves the song-label accuracy), then sibling OP/ED themes as
+    // last resort. The client uses this for INSTANT local fallback on
+    // any media failure — no server round-trip, just advance the index.
+    socket.on("round:altList", ({ list }) => {
+      altListRef.current = Array.isArray(list) ? list : [];
     });
 
     socket.on("round:start", ({ countdownMs, durationMs }) => {
@@ -937,8 +973,51 @@ export default function App() {
   function handleVideoFail(reason) {
     if (unplayableSentRef.current || altReqRef.current) return;
     clearTimeout(watchdogRef.current);
-    altReqRef.current = true;
     lastFailReasonRef.current = reason;
+
+    // FAST PATH: client has the full alt-list (shipped at round:prepare).
+    // Advance locally with zero server round-trip. After exhausting the
+    // list once, restart from index 0 for ONE more pass — catches the
+    // case where a transient network/CDN blip made everything fail. If
+    // the second pass also exhausts, escalate to roundUnplayable.
+    const list = altListRef.current;
+    if (list && list.length) {
+      altIndexRef.current += 1;
+      if (altIndexRef.current >= list.length) {
+        if (altCycleRef.current < 1) {
+          altCycleRef.current += 1;
+          altIndexRef.current = 0;
+        } else {
+          // PHASE.RESULT exhaustion: the round is settled, so don't
+          // void anything — just let the player sit empty. The user
+          // still has the result panel + buttons; the replay just
+          // didn't load on their connection. Other phases (PLAYING /
+          // COUNTDOWN / PREPARE) escalate to roundUnplayable so the
+          // round is voided cleanly (no Elo lost).
+          if (phaseRef.current !== PHASE.RESULT) reportUnplayable(reason);
+          return;
+        }
+      }
+      const next = list[altIndexRef.current];
+      setNotice(null);
+      setNeedTap(false);
+      // If the new encode has a paired audio file, take audio-first;
+      // otherwise immediately mark audio as failed so roundSrc picks
+      // the video URL.
+      setAudioFailed(!next.audio);
+      setRoundInfo((prev) =>
+        prev
+          ? { ...prev, videoUrl: next.video, audioUrl: next.audio || null }
+          : prev
+      );
+      return;
+    }
+
+    // FALLBACK PATH: server hasn't pushed the alt-list yet (race between
+    // round:prepare buffering failure and the round:altList arrival, or
+    // the server is on an older version). Ask the server for the next
+    // encode via the legacy on-failure path.
+    altReqRef.current = true;
     setNotice("That version wouldn't play — trying another…");
     socketRef.current?.emit("round:videoFailed", {
       url: roundInfo?.videoUrl,
@@ -2133,6 +2212,14 @@ export default function App() {
                 src={roundSrc || undefined}
                 playsInline
                 controls={phase === PHASE.RESULT}
+                /* Browser priority hint: the round's media is the most
+                   time-critical resource — beat avatar images / leaderboard
+                   refreshes for bandwidth. During PLAYING this points at
+                   the lightweight audio URL (audio-first), so high priority
+                   makes the audio buffer faster, helping the round start
+                   on time. Honored by Chrome 101+/Safari 17+/Firefox 119+;
+                   silently ignored elsewhere — no breakage. */
+                fetchPriority="high"
                 onLoadedMetadata={onLoadedMetadata}
                 onError={() => {
                   if (!roundSrc) return;
@@ -2146,23 +2233,14 @@ export default function App() {
                     onMediaTrouble("mediaerror");
                     return;
                   }
-                  // RESULT replay failed: try an alternate encode LOCALLY
-                  // via the same server endpoint. Capped to avoid an
-                  // infinite swap loop on a series of dead URLs. Never
-                  // escalates to "void the round" — the round is settled,
-                  // each user's replay is independent.
-                  if (
-                    phase === PHASE.RESULT &&
-                    resultRetriesRef.current < RESULT_MAX_RETRIES &&
-                    !altReqRef.current
-                  ) {
-                    resultRetriesRef.current += 1;
-                    altReqRef.current = true;
-                    socketRef.current?.emit("round:videoFailed", {
-                      url: roundInfo?.videoUrl,
-                      reason: "result:mediaerror",
-                    });
-                  }
+                  // RESULT replay failed: same local-alt-list path the
+                  // live round uses, including the cycle-once retry, so
+                  // the reveal also tries every encode TWICE before
+                  // giving up. handleVideoFail detects PHASE.RESULT and
+                  // bails silently when both passes exhaust (round is
+                  // already settled — never escalates to "void the
+                  // round").
+                  if (phase === PHASE.RESULT) handleVideoFail("result:mediaerror");
                 }}
                 style={{
                   visibility: phase === PHASE.RESULT ? "visible" : "hidden",

@@ -30,7 +30,11 @@ import {
   getPlayerStats,
   DATA_DIR,
 } from "./db.js";
-import { searchAnime, getThemeMediaLinks } from "./animethemes.js";
+import {
+  searchAnime,
+  getThemeMediaLinks,
+  getCachedThemeMediaLinks,
+} from "./animethemes.js";
 import { isCorrect } from "./matching.js";
 import { pickOpeningForElo } from "./selectOpening.js";
 import { startIngester } from "./pool.js";
@@ -173,10 +177,10 @@ app.get("/api/search", async (req, res) => {
 const GHOST_PLAYERS = [
   // Records scale with Elo and are ALL winning: ~81% win rate at the top
   // tapering to ~56% at the bottom (still positive), more games up top.
-  { id: "ghost:1",  nickname: "KamiSpeed",   elo: 4821, wins: 712, losses: 168, draws: 52, avatar: "/default.png" },
-  { id: "ghost:2",  nickname: "OPSniper",    elo: 4398, wins: 680, losses: 176, draws: 48, avatar: "/default.png" },
-  { id: "ghost:3",  nickname: "SakuraBlitz", elo: 4267, wins: 651, losses: 184, draws: 27, avatar: "/default.png" },
-  { id: "ghost:4",  nickname: "ZeroFrame",   elo: 4148, wins: 624, losses: 191, draws: 31, avatar: "/default.png" },
+  { id: "ghost:1",  nickname: "KamiSpeed",   elo: 5111, wins: 712, losses: 168, draws: 52, avatar: "/default.png" },
+  { id: "ghost:2",  nickname: "OPSniper",    elo: 4998, wins: 680, losses: 176, draws: 48, avatar: "/default.png" },
+  { id: "ghost:3",  nickname: "SakuraBlitz", elo: 4667, wins: 651, losses: 184, draws: 27, avatar: "/default.png" },
+  { id: "ghost:4",  nickname: "ZeroFrame",   elo: 4248, wins: 624, losses: 191, draws: 31, avatar: "/default.png" },
   { id: "ghost:5",  nickname: "TitanEar",    elo: 4022, wins: 598, losses: 198, draws: 29, avatar: "/default.png" },
   { id: "ghost:6",  nickname: "RamenGod",    elo: 3902, wins: 573, losses: 205, draws: 26, avatar: "/default.png" },
   { id: "ghost:7",  nickname: "NanoDesu",    elo: 3784, wins: 549, losses: 211, draws: 33, avatar: "/default.png" },
@@ -437,6 +441,22 @@ async function startRound(match) {
     videoUrl: opening.video.link,
     audioUrl: opening.audioUrl || null,
     dub: match.dub?.label || null,
+  });
+
+  // Eagerly resolve the alt-list (cached after the first call per
+  // anime+theme combo) and push it to every client in the match as a
+  // separate event. The client uses it for INSTANT, server-round-trip-
+  // free fallback when a video/audio source fails. We don't block
+  // round:prepare on it — clients can start buffering the primary
+  // immediately; the alt-list arrives whenever AnimeThemes responds
+  // (usually a cache hit = same tick).
+  match.altLinksP = getCachedThemeMediaLinks(
+    opening?.anime?.slug,
+    opening?.theme?.slug
+  );
+  match.altLinksP.then((list) => {
+    if (!matches.has(match.id)) return; // match ended while we waited
+    io.to(match.id).emit("round:altList", { list: list || [] });
   });
 
   // Give clients a window to buffer + report media length, then start.
@@ -1351,7 +1371,7 @@ io.on("connection", (socket) => {
     if (!slug)
       return socket.emit("round:altVideo", { url: null, audioUrl: null });
     if (!m.altLinksP)
-      m.altLinksP = getThemeMediaLinks(slug, m.opening?.theme?.slug);
+      m.altLinksP = getCachedThemeMediaLinks(slug, m.opening?.theme?.slug);
     let links = [];
     try {
       links = (await m.altLinksP) || [];
