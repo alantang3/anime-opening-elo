@@ -1400,18 +1400,26 @@ button.danger:hover:not(:disabled) {
   justify-content: center;
   width: 40px;
   height: 40px;
+  border-radius: 50%;
   color: #fff;
   text-decoration: none;
-  /* No standalone background — the icon button blends into the Creator
-     box's panel-2 surface. The SVG glyph itself is what's visible. */
-  background: transparent;
-  border: none;
-  opacity: 0.88;
-  transition: transform 0.15s ease, opacity 0.15s ease;
+  /* Purple → white-tinted gradient, matching AniTune's accent. */
+  background: linear-gradient(
+    135deg,
+    var(--accent-strong),
+    color-mix(in srgb, var(--accent) 35%, #fff)
+  );
+  border: 1px solid color-mix(in srgb, #fff 30%, transparent);
+  box-shadow:
+    0 0 14px -2px color-mix(in srgb, var(--accent) 70%, transparent),
+    inset 0 0 12px -6px rgba(255, 255, 255, 0.4);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 .about-icon:hover {
-  transform: scale(1.12);
-  opacity: 1;
+  transform: scale(1.08);
+  box-shadow:
+    0 0 22px -2px color-mix(in srgb, var(--accent) 80%, transparent),
+    inset 0 0 14px -4px rgba(255, 255, 255, 0.55);
 }
 .about-icon:active { transform: scale(0.96); }
 .about-icon svg { display: block; }
