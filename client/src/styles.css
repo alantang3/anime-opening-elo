@@ -1375,17 +1375,12 @@ button.danger:hover:not(:disabled) {
 }
 
 .about-creator {
-  padding: 16px;
+  /* Same neutral panel chrome as .about-ranks — no accent glow / tint.
+     The icon row provides all the purple in this box. */
+  padding: 14px 16px;
   border-radius: var(--radius);
-  background: linear-gradient(
-    160deg,
-    color-mix(in srgb, var(--accent) 22%, var(--panel-2)),
-    color-mix(in srgb, var(--accent) 6%, var(--panel))
-  );
-  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  box-shadow:
-    0 0 20px -6px color-mix(in srgb, var(--accent) 50%, transparent),
-    inset 0 0 24px -10px color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
 }
 .about-creator-text {
   color: #fff;
