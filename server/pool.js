@@ -18,6 +18,7 @@ import {
   upsertOpening,
   poolSize,
   backfillOpeningsFromCache,
+  cachedPopularityCount,
 } from "./db.js";
 
 const ITEMS_PER_TICK = 4;       // anime resolved per tick
@@ -32,10 +33,21 @@ let running = false;
 // Popularity-walk cursor. A Jikan page (~25 anime) is fetched once and then
 // consumed a few per tick; when exhausted we advance, wrapping back to the
 // top at the end so members stay refreshed over time.
+// `popPage` is initialized on startIngester() from the mal_popularity row
+// count so a redeploy doesn't reset progress (without this, the ingester
+// re-walks all already-cached pages — ~75 min in warm mode — before any
+// new row gets added).
 let popPage = 1;
 let popIdx = 0;
 let pageEntries = [];
 let pageHasNext = false;
+
+// Jikan's top/anime?filter=bypopularity returns ~25 entries per page. The
+// smart-start formula floor(count / PAGE_SIZE) always rounds DOWN to the
+// page currently in progress (or earlier), so the ingester re-walks at
+// most one already-cached page and never SKIPS a page. ON CONFLICT
+// behavior on re-cache is no-op (just refreshes fetched_at).
+const POPULARITY_PAGE_SIZE = 25;
 
 // Resolve one MAL-popular anime to its AnimeThemes OPs and store every one.
 // Returns the number of rows upserted (0 if it can't be pooled).
@@ -148,6 +160,16 @@ async function tick() {
 export async function startIngester() {
   if (running) return;
   running = true;
+  // Smart-start: resume the Jikan cursor based on how many popularity
+  // rows we've already cached. floor(count/25) rounds DOWN to the
+  // in-progress page (or earlier), so we re-walk at most ONE already-
+  // cached page rather than starting from page 1 every boot.
+  try {
+    const cached = await cachedPopularityCount();
+    popPage = Math.max(1, Math.floor(cached / POPULARITY_PAGE_SIZE));
+  } catch {
+    popPage = 1; // DB blip on startup — degrade to scratch.
+  }
   // Immediately rescue rows poisoned before the skip-NULL fix shipped.
   try {
     const fixed = await backfillOpeningsFromCache(membersToFactor);
@@ -167,6 +189,9 @@ export async function startIngester() {
     const next = !ok ? TICK_WARM_MS : small ? TICK_COLD_MS : TICK_WARM_MS;
     setTimeout(loop, next).unref?.();
   };
-  console.log(`Opening ingester started (pool: ${await poolSize()})`);
+  console.log(
+    `Opening ingester started (pool: ${await poolSize()}, ` +
+    `resume page ${popPage})`
+  );
   loop();
 }

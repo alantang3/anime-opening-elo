@@ -384,6 +384,15 @@ export async function cacheAnilistTitles(malId, titles) {
   );
 }
 
+// Count of cached popularity rows. Used by the ingester (pool.js) to
+// smart-start its Jikan-page cursor on boot — without this, a redeploy
+// resets popPage to 1 and the ingester wastes ~75 min (in warm mode)
+// re-walking the same already-cached pages before adding a new row.
+export async function cachedPopularityCount() {
+  const r = await qOne(`SELECT COUNT(*)::int AS n FROM mal_popularity`);
+  return r?.n ?? 0;
+}
+
 // ---------- Opening pool ----------
 
 export async function upsertOpening(row) {
