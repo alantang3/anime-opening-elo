@@ -2012,6 +2012,9 @@ export default function App() {
             <div className="hero-sub">
               Battle players. Guess faster. Climb&nbsp;ELO.
             </div>
+            <div className="hero-tagline">
+              Higher Elo, deeper catalog.
+            </div>
             {googleClientId === "" ? (
               <div className="notice" style={{ marginTop: 22 }}>
                 Google sign-in isn’t configured yet — set{" "}
