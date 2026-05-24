@@ -48,6 +48,10 @@ import {
   verifySession,
   issueSession,
 } from "./auth.js";
+import { putAvatar, AVATAR_MIME_TO_EXT, LOCAL_AVATAR_DIR } from "./storage.js";
+import { redis, redisEnabled, pubClient, subClient } from "./redis.js";
+import { createAdapter } from "@socket.io/redis-adapter";
+import { RedisStore as RateLimitRedisStore } from "rate-limit-redis";
 
 // ---------- Tunables ----------
 const PORT = process.env.PORT || 5174;
@@ -100,14 +104,31 @@ app.use(express.json({ limit: "3mb" })); // headroom for base64 avatar uploads
 // ---------- Rate limits (per-IP) ----------
 // Public endpoints only. Authenticated socket events are throttled below
 // via a per-socket sliding window.
-const rl = (windowMs, limit, message) =>
-  rateLimit({
+//
+// Phase 3 (multi-instance): rate limits are backed by Redis when configured.
+// Without Redis, every instance keeps its own counter — so an attacker with
+// two requests routed to different instances counts as 1/limit on EACH. With
+// Redis the counter is global. We fall back to the in-memory store when
+// REDIS_URL isn't set so dev still works.
+const rl = (windowMs, limit, message) => {
+  const opts = {
     windowMs,
     limit,
     standardHeaders: "draft-7",
     legacyHeaders: false,
     message: message ? { error: message } : undefined,
-  });
+  };
+  if (redisEnabled) {
+    // sendCommand: the rate-limit-redis store is client-agnostic; we feed
+    // it raw command arrays for ioredis to execute. Key prefix keeps the
+    // limiter's keys namespaced so they don't collide with Phase 4 keys.
+    opts.store = new RateLimitRedisStore({
+      sendCommand: (...args) => redis.call(...args),
+      prefix: "rl:",
+    });
+  }
+  return rateLimit(opts);
+};
 // Autocomplete fires per keystroke; legitimate users blow past 60/min
 // easily (a few search sessions in a minute). 120/min/IP still kills the
 // iterate-uniques cache-bypass attack since each unique query also has
@@ -125,12 +146,14 @@ const limitAvatarUpload = rl(60 * 60_000, 5, "Slow down on avatar changes.");
 const limitMeRead = rl(60_000, 60);
 const limitLeaderboard = rl(60_000, 60);
 
-// User-uploaded avatars live on the persistent disk and are served here.
-const AVATAR_DIR = path.join(DATA_DIR, "avatars");
-fs.mkdirSync(AVATAR_DIR, { recursive: true });
+// Phase 2 (object storage): user-uploaded avatars are stored in Cloudflare
+// R2 when configured (see storage.js), falling back to the local disk dir
+// otherwise. We still mount the /avatars static route in BOTH modes so any
+// pre-R2 rows (or rows written during a fallback deploy) keep resolving
+// without a one-shot migration job.
 app.use(
   "/avatars",
-  express.static(AVATAR_DIR, { maxAge: "1h", immutable: false })
+  express.static(LOCAL_AVATAR_DIR, { maxAge: "1h", immutable: false })
 );
 
 // Pull the authenticated player from a Bearer session token (HTTP routes;
@@ -182,13 +205,15 @@ app.post("/api/auth/guest", limitGuestAuth, async (req, res) => {
       const buf = Buffer.from(m[2], "base64");
       if (buf.length > 1_200_000)
         return res.status(413).json({ error: "image too large (max ~1.2MB)" });
-      const ext = AVATAR_EXT[m[1]];
+      const ext = AVATAR_MIME_TO_EXT[m[1]];
+      let url;
       try {
-        fs.writeFileSync(path.join(AVATAR_DIR, `${player.id}.${ext}`), buf);
-      } catch {
+        url = await putAvatar(player.id, ext, buf, m[1]);
+      } catch (e) {
+        console.error("putAvatar (guest):", e.message);
         return res.status(500).json({ error: "could not save image" });
       }
-      player = await setCustomAvatar(player.id, `/avatars/${player.id}.${ext}?t=${Date.now()}`);
+      player = await setCustomAvatar(player.id, url);
     }
     res.json({ token: issueSession(player), player: publicPlayer(player) });
   } catch (err) {
@@ -198,11 +223,44 @@ app.post("/api/auth/guest", limitGuestAuth, async (req, res) => {
 });
 
 // Autocomplete is the other per-keystroke AnimeThemes call, so cache it:
-// short TTL + small LRU. Many users type the same prefixes ("nar", "one"…),
-// so this collapses huge numbers of identical lookups into one.
-const searchCache = new Map(); // q -> { at, results }
-const SEARCH_TTL_MS = 10 * 60 * 1000;
+// short TTL. Many users type the same prefixes ("nar", "one"…), so this
+// collapses huge numbers of identical lookups into one.
+//
+// Phase 3: shared Redis cache when configured (one instance warms it,
+// all instances benefit), falling back to a per-instance Map otherwise.
+const SEARCH_TTL_S = 600; // 10 min
+const SEARCH_TTL_MS = SEARCH_TTL_S * 1000;
 const SEARCH_CACHE_MAX = 500;
+const localSearchCache = new Map(); // q -> { at, results }
+
+async function getCachedSearch(q) {
+  if (redisEnabled) {
+    try {
+      const raw = await redis.get(`search:${q}`);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null; // Redis hiccup — let the caller re-fetch.
+    }
+  }
+  const hit = localSearchCache.get(q);
+  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) return hit.results;
+  return null;
+}
+
+async function setCachedSearch(q, results) {
+  if (redisEnabled) {
+    try {
+      // EX 600s — Redis evicts automatically; no manual LRU needed.
+      await redis.set(`search:${q}`, JSON.stringify(results), "EX", SEARCH_TTL_S);
+    } catch {
+      /* best-effort cache */
+    }
+    return;
+  }
+  localSearchCache.set(q, { at: Date.now(), results });
+  if (localSearchCache.size > SEARCH_CACHE_MAX)
+    localSearchCache.delete(localSearchCache.keys().next().value); // evict oldest
+}
 
 app.get("/api/search", limitSearch, async (req, res) => {
   const q = String(req.query.q || "").trim().toLowerCase();
@@ -210,19 +268,15 @@ app.get("/api/search", limitSearch, async (req, res) => {
   // iterate-uniques cache-bypass abuse (?q=a, ?q=aa, ?q=aaa, …) AND
   // empty/typo'd hits that wouldn't return useful results anyway.
   if (q.length < 2 || q.length > 50) return res.json({ results: [] });
-  const hit = searchCache.get(q);
-  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) {
-    return res.json({ results: hit.results });
-  }
+  const cached = await getCachedSearch(q);
+  if (cached) return res.json({ results: cached });
   try {
     const results = await searchAnime(q);
-    searchCache.set(q, { at: Date.now(), results });
-    if (searchCache.size > SEARCH_CACHE_MAX)
-      searchCache.delete(searchCache.keys().next().value); // evict oldest
+    await setCachedSearch(q, results);
     res.json({ results });
   } catch (err) {
     console.error("search:", err.message);
-    if (hit) return res.json({ results: hit.results }); // serve stale on error
+    if (cached) return res.json({ results: cached }); // serve stale on error
     res.status(502).json({ error: String(err.message || err) });
   }
 });
@@ -269,8 +323,8 @@ app.get("/api/me/stats", limitMeRead, async (req, res) => {
   res.json(await getPlayerStats(p.id, 12));
 });
 
-// Upload a custom profile picture (base64 data URL in JSON).
-const AVATAR_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
+// Upload a custom profile picture (base64 data URL in JSON). Storage layer
+// decides whether the bytes land in R2 or the local fallback dir.
 app.post("/api/me/avatar", limitAvatarUpload, async (req, res) => {
   const p = await authPlayer(req);
   if (!p) return res.status(401).json({ error: "sign in" });
@@ -281,20 +335,14 @@ app.post("/api/me/avatar", limitAvatarUpload, async (req, res) => {
   const buf = Buffer.from(m[2], "base64");
   if (buf.length > 1_200_000)
     return res.status(413).json({ error: "image too large (max ~1.2MB)" });
-  const ext = AVATAR_EXT[m[1]];
-  // Single file per player; clean up other extensions so it doesn't grow.
-  for (const e of Object.values(AVATAR_EXT)) {
-    if (e !== ext)
-      try {
-        fs.unlinkSync(path.join(AVATAR_DIR, `${p.id}.${e}`));
-      } catch {}
-  }
+  const ext = AVATAR_MIME_TO_EXT[m[1]];
+  let url;
   try {
-    fs.writeFileSync(path.join(AVATAR_DIR, `${p.id}.${ext}`), buf);
+    url = await putAvatar(p.id, ext, buf, m[1]);
   } catch (e) {
+    console.error("putAvatar (me):", e.message);
     return res.status(500).json({ error: "could not save image" });
   }
-  const url = `/avatars/${p.id}.${ext}?t=${Date.now()}`;
   const updated = await setCustomAvatar(p.id, url);
   res.json({ player: publicPlayer(updated) });
 });
@@ -317,6 +365,16 @@ if (fs.existsSync(path.join(CLIENT_DIST, "index.html"))) {
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true } });
+
+// Phase 3: when Redis is configured, swap the in-memory adapter for the
+// Redis pub/sub adapter. This is the prerequisite for multi-instance —
+// emits to a room "match:<id>" now reach sockets connected to OTHER
+// instances via Redis pub/sub. With no Redis, the default in-memory
+// adapter keeps single-instance behavior identical to Phase 1/2.
+if (redisEnabled) {
+  io.adapter(createAdapter(pubClient, subClient));
+  console.log("Socket.IO: Redis adapter active");
+}
 
 // ---------- Connection + match state ----------
 // socket.id -> { socket, player, status: 'idle'|'queued'|'match', matchId }

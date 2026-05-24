@@ -8,6 +8,8 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.654.0",
+    "@socket.io/redis-adapter": "^8.3.0",
     "anime-opening-elo": "file:..",
     "better-sqlite3": "^12.10.0",
     "cors": "^2.8.5",
@@ -15,8 +17,10 @@
     "express-rate-limit": "^8.5.2",
     "google-auth-library": "^10.6.2",
     "helmet": "^8.2.0",
+    "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.21.0",
+    "rate-limit-redis": "^4.2.0",
     "socket.io": "^4.8.3"
   }
 }

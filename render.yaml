@@ -39,6 +39,28 @@ services:
       # refuse to boot without it.
       - key: DATABASE_URL
         sync: false
+      # Cloudflare R2 avatar storage. All FIVE must be set for R2 mode;
+      # if any is missing the server transparently falls back to writing
+      # avatars to the persistent disk (Phase 1 behavior). The two
+      # secret values (access key + secret) use sync: false so they're
+      # only set in the Render dashboard, never committed here.
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_PUBLIC_BASE_URL
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      # Phase 3: Upstash Redis connection string (rediss://...). Required
+      # for the Socket.IO Redis adapter (multi-instance broadcasts),
+      # cross-instance rate limits, and shared search cache. Without it
+      # the server falls back to single-instance in-memory equivalents,
+      # so you can deploy this code before signing up for Upstash.
+      - key: REDIS_URL
+        sync: false
     disk:
       name: data
       mountPath: /var/data

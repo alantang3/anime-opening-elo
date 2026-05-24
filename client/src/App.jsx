@@ -2515,10 +2515,21 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
 
           <div style={{ marginTop: 10 }}>
             Your Elo: <strong>{r.eloAfter}</strong>{" "}
-            <span className={delta >= 0 ? "delta-pos" : "delta-neg"}>
-              ({delta >= 0 ? "+" : ""}
-              {delta})
-            </span>
+            {/* delta=0 happens at the 100-Elo floor: you "lost" but the
+                clamp prevents the rating dropping further. Read the sign
+                from the OUTCOME (won/lost), not from the math, so a
+                floored loss reads "-0" instead of misleadingly "+0".
+                Unplayable rounds are a true no-op and keep "+0". */}
+            {(() => {
+              const isLoss = !won && result.outcome !== "unplayable";
+              const displayNeg = delta < 0 || (delta === 0 && isLoss);
+              return (
+                <span className={displayNeg ? "delta-neg" : "delta-pos"}>
+                  ({displayNeg ? "-" : "+"}
+                  {Math.abs(delta)})
+                </span>
+              );
+            })()}
           </div>
         </div>
         {/* Yuzu cheers on wins; Kuro pouts in her exact slot on a decisive
