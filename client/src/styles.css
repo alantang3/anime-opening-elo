@@ -565,14 +565,18 @@ button.danger:hover:not(:disabled) {
 }
 .av-btn {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--panel-2);
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 999px;
-  padding: 6px 12px;
-  font-size: 13px;
-  font-weight: 600;
+  padding: 7px 13px;
   cursor: pointer;
+}
+.av-btn svg {
+  display: block;
 }
 .av-btn.on {
   background: var(--accent);
@@ -583,6 +587,17 @@ button.danger:hover:not(:disabled) {
   color: var(--muted);
   font-size: 12px;
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.av-peer-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.av-peer-icons svg {
+  display: block;
 }
 /* Camera/mic feeds render INSIDE .player-wrap (no separate box). Selectors
    are scoped under .player-wrap so they out-specify `.player-wrap video`. */

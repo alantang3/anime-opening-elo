@@ -65,6 +65,43 @@ const CAM_CONSTRAINTS = {
   frameRate: { ideal: 24, max: 30 },
 };
 
+// Teams-style white camera/mic glyphs, shared by the toggle buttons and the
+// opponent status indicator so they stay visually consistent. `slashed` draws
+// the "off/muted" diagonal line (the under-stroke matches --panel-2 so it
+// reads as a cutout across the filled icon).
+function AVSlash() {
+  return (
+    <>
+      <line x1="3" y1="3" x2="21" y2="21" style={{ stroke: "var(--panel-2)" }} strokeWidth="4" strokeLinecap="round" />
+      <line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </>
+  );
+}
+function CamGlyph({ size = 20, slashed = false }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
+      <rect x="1.5" y="6.75" width="13.5" height="10.5" rx="2.6" fill="currentColor" />
+      <path
+        fill="currentColor"
+        d="M16 10.4l4.4-2.5c.6-.35 1.35.08 1.35.78v6.64c0 .7-.75 1.13-1.35.78L16 13.6v-3.2z"
+      />
+      {slashed && <AVSlash />}
+    </svg>
+  );
+}
+function MicGlyph({ size = 20, slashed = false }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
+      <rect x="9" y="2.5" width="6" height="11" rx="3" fill="currentColor" />
+      <path
+        fill="currentColor"
+        d="M7 11.5a1 1 0 0 0-2 0 7 7 0 0 0 6 6.93V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-1.57a7 7 0 0 0 6-6.93 1 1 0 1 0-2 0 5 5 0 0 1-10 0z"
+      />
+      {slashed && <AVSlash />}
+    </svg>
+  );
+}
+
 // Anime-flavoured rank tiers across Elo ranges (everyone starts at 100).
 // Escalating aura: dim/cool at the bottom → cool-vivid → hot → radiant.
 // Every tier is a distinct hue/brightness so no two look alike.
@@ -2446,20 +2483,29 @@ export default function App() {
               <button
                 className={"av-btn" + (camOn ? " on" : "")}
                 onClick={toggleCam}
+                aria-label={camOn ? "Turn camera off" : "Turn camera on"}
+                title={camOn ? "Turn camera off" : "Turn camera on"}
               >
-                {camOn ? "📷 Camera on" : "📷 Camera"}
+                <CamGlyph slashed={!camOn} />
               </button>
               <button
                 className={"av-btn" + (micOn ? " on" : "")}
                 onClick={toggleMic}
+                aria-label={micOn ? "Turn microphone off" : "Turn microphone on"}
+                title={micOn ? "Turn microphone off" : "Turn microphone on"}
               >
-                {micOn ? "🎤 Mic on" : "🎤 Mic"}
+                <MicGlyph slashed={!micOn} />
               </button>
               <span className="av-peer">
                 {opponent?.nickname}:{" "}
-                {peerAV.cam || peerAV.mic
-                  ? `${peerAV.cam ? "📷" : ""}${peerAV.mic ? "🎤" : ""}`
-                  : "—"}
+                {peerAV.cam || peerAV.mic ? (
+                  <span className="av-peer-icons">
+                    {peerAV.cam && <CamGlyph size={15} />}
+                    {peerAV.mic && <MicGlyph size={15} />}
+                  </span>
+                ) : (
+                  "—"
+                )}
               </span>
             </div>
 
