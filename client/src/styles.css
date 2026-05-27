@@ -589,6 +589,25 @@ button.danger:hover:not(:disabled) {
 .player-wrap .cam-remote.empty {
   background: #0d0f14;
 }
+.player-wrap .cam-unmute {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  z-index: 3;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+.player-wrap .cam-unmute:hover {
+  background: rgba(0, 0, 0, 0.9);
+}
 .player-wrap .cam-local {
   position: absolute;
   right: 10px;

@@ -52,6 +52,36 @@ import { putAvatar, AVATAR_MIME_TO_EXT, LOCAL_AVATAR_DIR } from "./storage.js";
 import { redis, redisEnabled, pubClient, subClient } from "./redis.js";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { RedisStore as RateLimitRedisStore } from "rate-limit-redis";
+import {
+  clusterEnabled,
+  INSTANCE_ID,
+  onClusterMessage,
+  publishToInstance,
+  setPresence,
+  refreshPresence,
+  clearPresence,
+  getPresence,
+  isLocalInstance,
+  acquireOrRenewLeader,
+  releaseLeader,
+  inviteCreate,
+  inviteGet,
+  inviteExists,
+  inviteDelete,
+  inviteRemoveByHost,
+  queueAdd,
+  queueRemove,
+  queueHas,
+  queueAll,
+  queueClaimPair,
+  queueClaimOne,
+  instanceHeartbeat,
+  instanceIsAlive,
+  playerMatchSet,
+  playerMatchRefresh,
+  playerMatchGet,
+  playerMatchClear,
+} from "./cluster.js";
 
 // ---------- Tunables ----------
 const PORT = process.env.PORT || 5174;
@@ -364,7 +394,18 @@ if (fs.existsSync(path.join(CLIENT_DIST, "index.html"))) {
 }
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: true } });
+// Transport choice matters for horizontal scaling. HTTP long-polling makes
+// several requests per session that MUST hit the same instance, which needs
+// sticky sessions at the load balancer (Render doesn't reliably offer them).
+// A WebSocket is a single long-lived connection to one instance, so it needs
+// no stickiness — combined with the Redis adapter (cross-instance
+// broadcasts) it's the canonical Socket.IO scale-out setup. So when we're
+// clustered we force websocket-only; single-instance keeps polling as a
+// fallback for restrictive networks.
+const io = new Server(server, {
+  cors: { origin: true },
+  transports: clusterEnabled ? ["websocket"] : ["polling", "websocket"],
+});
 
 // Phase 3: when Redis is configured, swap the in-memory adapter for the
 // Redis pub/sub adapter. This is the prerequisite for multi-instance —
@@ -375,16 +416,23 @@ if (redisEnabled) {
   io.adapter(createAdapter(pubClient, subClient));
   console.log("Socket.IO: Redis adapter active");
 }
+if (clusterEnabled) {
+  console.log(`Cluster: multi-instance mode, instance id ${INSTANCE_ID}`);
+} else {
+  console.log("Cluster: single-instance mode (REDIS_URL not set)");
+}
 
 // ---------- Connection + match state ----------
 // socket.id -> { socket, player, status: 'idle'|'queued'|'match', matchId }
 const conns = new Map();
-// FIFO matchmaking queue of socket ids.
-let queue = [];
+// The FIFO matchmaking queue now lives in Redis (server/cluster.js) so all
+// instances share one pool; a single leader instance runs the pairing tick.
+// Falls back to an in-process map when REDIS_URL is unset.
 // matchId -> Match
 const matches = new Map();
-// invite code -> { hostSocketId, createdAt }
-const invites = new Map();
+// Invites live in Redis (server/cluster.js) so a friend who connects to a
+// different instance can still resolve the host's code; falls back to an
+// in-process map when REDIS_URL is unset.
 
 const snapshot = (row) => ({
   id: row.id,
@@ -427,6 +475,18 @@ const BAND_TIER_2_ELO = 1000;
 // resolution means worst-case bot-fallback is BOT_WAIT_MS + 1s.
 const MATCHMAKER_TICK_MS = 1000;
 
+// Exactly ONE instance runs the pairing tick (the "matchmaker leader") so two
+// instances can't pull the same player from the shared queue. We hold a
+// Redis lock with a short TTL and renew it on a heartbeat; if the leader dies,
+// another instance takes over within LEADER_TTL_MS. Single-instance (no
+// Redis) is trivially always the leader.
+const LEADER_TTL_MS = 5_000;
+const LEADER_HEARTBEAT_MS = 2_000;
+let amLeader = !clusterEnabled;
+async function leaderHeartbeat() {
+  amLeader = await acquireOrRenewLeader("matchmaker", LEADER_TTL_MS);
+}
+
 function eloBandFor(waitMs) {
   if (waitMs < BAND_TIER_1_MS) return BAND_TIER_1_ELO;
   if (waitMs < BAND_TIER_2_MS) return BAND_TIER_2_ELO;
@@ -436,7 +496,6 @@ function eloBandFor(waitMs) {
 async function enqueue(socketId) {
   const c = conns.get(socketId);
   if (!c || c.status !== "idle") return;
-  if (!queue.includes(socketId)) queue.push(socketId);
   c.status = "queued";
   // Stamp wait-start so band-widening is deterministic. Elo is cached
   // here too: it can't change while you're in the queue (you're not
@@ -446,12 +505,21 @@ async function enqueue(socketId) {
   // After the await, the player might have disconnected — bail rather
   // than leaving a dead entry in the queue.
   if (!conns.has(socketId) || c.status !== "queued") return;
+  await queueAdd({
+    socketId,
+    playerId: c.player.id,
+    instanceId: INSTANCE_ID,
+    queuedAt: c.queuedAt,
+    eloAtQueue: c.eloAtQueue,
+  });
   c.socket.emit("queued");
+  // Nudge the matchmaker; no-op unless we're the leader (otherwise the
+  // leader's periodic tick picks it up within MATCHMAKER_TICK_MS).
   tryMatch();
 }
 
-function dequeue(socketId) {
-  queue = queue.filter((id) => id !== socketId);
+async function dequeue(socketId) {
+  await queueRemove(socketId);
   const c = conns.get(socketId);
   if (c && c.status === "queued") {
     c.status = "idle";
@@ -460,64 +528,204 @@ function dequeue(socketId) {
   }
 }
 
-// One scan of the queue: pair the longest-waiting player whose band finds
-// a partner. Repeat until no more pairs form, then return. Players whose
-// band is too narrow this tick are skipped — they'll widen on a later
-// tick. Async because createMatch refreshes player.elo from Postgres
-// before emitting matchFound; the queue manipulation itself is sync.
+// Re-entrancy guard: runMatchmaker awaits DB reads inside createMatch, so a
+// 1s tick could overlap a slow run. Serialize.
+let matchmaking = false;
+
+// Leader-gated entry point. Called on the periodic tick AND opportunistically
+// from enqueue. Bails immediately on non-leader instances.
 async function tryMatch() {
-  // Players that we've already tried (and failed) to pair THIS tick. We
-  // skip them on subsequent iterations so we keep moving down the queue
-  // looking for pairs that ARE possible right now (e.g., two mid-Elo
-  // newcomers can pair even if the longest-waiting top-Elo player has
-  // no partner in their band yet).
+  if (!amLeader) return;
+  if (matchmaking) return;
+  matchmaking = true;
+  try {
+    await runMatchmaker();
+  } catch (err) {
+    console.error("runMatchmaker:", err.message);
+  } finally {
+    matchmaking = false;
+  }
+}
+
+// One scan of the SHARED queue (read once from Redis), pairing the
+// longest-waiting player whose band finds a partner; repeat until no more
+// pairs form. Within a band we PREFER a same-instance partner (keeps the
+// match's I/O in-process) and only reach across instances when there's no
+// local partner in range. Pairs are claimed atomically so a cancel/other
+// tick can't double-book; an unclaimable pair is skipped this scan.
+async function runMatchmaker() {
+  let entries = await queueAll();
+  // Longest waiting first — priority to people who've waited the most.
+  entries.sort((a, b) => a.queuedAt - b.queuedAt);
   const skip = new Set();
 
   while (true) {
-    const candidates = queue
-      .map((id) => conns.get(id))
-      .filter((c) => c && c.status === "queued" && !skip.has(c.socket.id));
-    if (candidates.length === 0) return;
-    // Longest waiting first — gives priority to people who've been
-    // waiting the most when picking who to try to pair next.
-    candidates.sort((a, b) => a.queuedAt - b.queuedAt);
-    const a = candidates[0];
+    const live = entries.filter((e) => !skip.has(e.socketId));
+    if (live.length === 0) return;
+    const a = live[0];
     const aWait = Date.now() - a.queuedAt;
     const band = eloBandFor(aWait);
 
-    // Find the longest-waiting viable partner within a's band.
+    // Longest-waiting viable partner within a's band; prefer same instance.
     let best = null;
-    for (let i = 1; i < candidates.length; i++) {
-      const b = candidates[i];
+    let bestRemote = null;
+    for (let i = 1; i < live.length; i++) {
+      const b = live[i];
       if (Math.abs(a.eloAtQueue - b.eloAtQueue) > band) continue;
-      // candidates is already sorted oldest-first, so the first viable
-      // one IS the longest-waiting viable partner.
-      best = b;
-      break;
+      if (b.instanceId === a.instanceId) {
+        best = b; // same-instance + already oldest-first = our pick
+        break;
+      }
+      if (!bestRemote) bestRemote = b; // oldest in-band cross-instance partner
     }
+    best = best || bestRemote;
 
     if (best) {
-      queue = queue.filter(
-        (id) => id !== a.socket.id && id !== best.socket.id
-      );
-      await createMatch(a, best);
-      continue; // try to form more pairs from what's left
-    }
-
-    // No human partner. If a has crossed the bot threshold, drop them
-    // into a bot match — there's literally nobody else viable.
-    if (aWait >= BOT_WAIT_MS) {
-      queue = queue.filter((id) => id !== a.socket.id);
-      await createMatch(a, await makeBotConn(a));
+      const claimed = await queueClaimPair(a.socketId, best.socketId);
+      if (claimed) {
+        await spawnMatch(claimed[0], claimed[1]);
+        entries = entries.filter(
+          (e) => e.socketId !== a.socketId && e.socketId !== best.socketId
+        );
+      } else {
+        // One of them vanished (cancel/disconnect) between read and claim.
+        skip.add(a.socketId);
+        skip.add(best.socketId);
+      }
       continue;
     }
 
-    // a can't pair yet (band too narrow + not bot-eligible). Skip them
-    // for the rest of this tick and try shorter-waiting candidates —
-    // they might still pair among themselves even though they failed
-    // to match with a.
-    skip.add(a.socket.id);
+    // No human partner. If a crossed the bot threshold, give them a bot.
+    if (aWait >= BOT_WAIT_MS) {
+      const claimed = await queueClaimOne(a.socketId);
+      if (claimed) {
+        await spawnBotMatch(claimed);
+        entries = entries.filter((e) => e.socketId !== a.socketId);
+      } else {
+        skip.add(a.socketId);
+      }
+      continue;
+    }
+
+    // a can't pair yet (band too narrow + not bot-eligible). Skip them for
+    // the rest of this scan; they widen on a later tick.
+    skip.add(a.socketId);
   }
+}
+
+// Turn a claimed pair of queue entries into a live match. The match is OWNED
+// by aEntry's instance (so at least one player is local to the owner). If
+// that's us, build it here; otherwise hand off to the owner instance. The
+// partner may be local or a remote member (Phase 4d).
+async function spawnMatch(aEntry, bEntry) {
+  if (!isLocalInstance(aEntry.instanceId)) {
+    await publishToInstance(aEntry.instanceId, {
+      type: "spawnMatch",
+      a: aEntry,
+      b: bEntry,
+    });
+    return;
+  }
+  const aConn = conns.get(aEntry.socketId);
+  if (!aConn || aConn.status !== "queued") {
+    // Owner's player already gone — try to keep the partner queued.
+    return requeueEntry(bEntry);
+  }
+  const bConn = isLocalInstance(bEntry.instanceId)
+    ? conns.get(bEntry.socketId)
+    : makeRemoteConn(bEntry);
+  if (!bConn || (isLocalInstance(bEntry.instanceId) && bConn.status !== "queued")) {
+    return requeueEntry(aEntry);
+  }
+  await createMatch(aConn, bConn);
+}
+
+async function spawnBotMatch(entry) {
+  if (!isLocalInstance(entry.instanceId)) {
+    await publishToInstance(entry.instanceId, { type: "spawnBot", entry });
+    return;
+  }
+  const c = conns.get(entry.socketId);
+  if (!c || c.status !== "queued") return;
+  await createMatch(c, await makeBotConn(c));
+}
+
+// Put a still-connected player back in the pool (used when a pairing falls
+// through because the other side vanished). Routed to their instance.
+async function requeueEntry(entry) {
+  if (!isLocalInstance(entry.instanceId)) {
+    await publishToInstance(entry.instanceId, { type: "requeue", entry });
+    return;
+  }
+  const c = conns.get(entry.socketId);
+  if (c && c.status === "queued") await queueAdd(entry);
+}
+
+// Build a stand-in conn for a player connected to ANOTHER instance so the
+// owner's match.members can hold them like any other member. The proxy
+// socket routes ALL server->client traffic through the Socket.IO Redis
+// adapter, which delivers to whichever instance actually holds the socket:
+//   - emit            -> io.to(socketId)         (targeted, cross-instance)
+//   - emit + ack      -> io.to(socketId).timeout (broadcast-ack form)
+//   - to(room).emit   -> io.to(room).except(self) ("everyone but me")
+//   - join/leave      -> io.in(socketId).socketsJoin/Leave (cross-instance)
+// Incoming events from this player are forwarded to us by their instance
+// (see the cluster message dispatcher). player carries only id; createMatch
+// refreshes the full row from Postgres just like a local member.
+function makeRemoteSocket(sid) {
+  return {
+    id: sid,
+    emit: (event, payload) => io.to(sid).emit(event, payload),
+    join: (room) => io.in(sid).socketsJoin(room),
+    leave: (room) => io.in(sid).socketsLeave(room),
+    to: (room) => ({
+      emit: (event, payload) => io.to(room).except(sid).emit(event, payload),
+    }),
+    // Mirror socket.timeout(ms).emit(ev, payload, cb). Broadcast-ack delivers
+    // (err, responses[]) — collapse to cb(err) so emitWithAckRetry's retry
+    // logic (which only inspects err) works unchanged.
+    timeout: (ms) => ({
+      emit: (event, payload, cb) =>
+        io
+          .to(sid)
+          .timeout(ms)
+          .emit(event, payload, (err) => cb && cb(err)),
+    }),
+  };
+}
+
+function makeRemoteConn(entry) {
+  return {
+    socket: makeRemoteSocket(entry.socketId),
+    player: { id: entry.playerId },
+    status: "match",
+    matchId: null,
+    isBot: false,
+    isRemote: true,
+    remoteInstance: entry.instanceId,
+  };
+}
+
+// Release a member back to idle when a match ends/teardown. For a LOCAL
+// member we reset its conn (and optionally requeue). For a REMOTE member we
+// can't touch its real conn (lives on another instance) — tell that instance
+// to do it via the cluster bus. Bots have no state to release.
+function memberIdle(c, { requeue = false } = {}) {
+  if (!c || c.isBot) return;
+  // We're the owner here, so we hold this player's match-registry entry —
+  // clear it as they leave (matchId-scoped so we don't clobber a new match).
+  if (c.player?.id) playerMatchClear(c.player.id, c.matchId);
+  if (c.isRemote) {
+    publishToInstance(c.remoteInstance, {
+      type: "matchUnbind",
+      socketId: c.socket.id,
+      requeue,
+    });
+    return;
+  }
+  c.status = "idle";
+  c.matchId = null;
+  if (requeue) enqueue(c.socket.id);
 }
 
 // ---------- Match lifecycle ----------
@@ -525,6 +733,10 @@ async function createMatch(a, b) {
   const id = crypto.randomUUID();
   const match = {
     id,
+    // This instance owns the match: it holds the timers + authoritative game
+    // state. A member may be local, a bot, or a remote proxy (another
+    // instance's player) — see makeRemoteConn.
+    ownerInstance: INSTANCE_ID,
     members: [a, b], // connection contexts (one may be a bot)
     bot: [a, b].find((m) => m.isBot) || null,
     state: "preparing", // preparing | countdown | playing | result | rematch
@@ -541,13 +753,27 @@ async function createMatch(a, b) {
   matches.set(id, match);
 
   for (const c of match.members) {
-    queue = queue.filter((qid) => qid !== c.socket.id);
+    // Members were already claimed out of the shared queue by the matchmaker
+    // (or were never queued, for invite matches); nothing to remove here.
     c.status = "match";
     c.matchId = id;
     c.socket.join(id);
+    if (c.isRemote) {
+      // Tell the member's instance it's now in our match so it forwards the
+      // player's in-match events here and tracks their lobby state.
+      publishToInstance(c.remoteInstance, {
+        type: "matchBind",
+        socketId: c.socket.id,
+        matchId: id,
+        ownerInstance: INSTANCE_ID,
+      });
+    }
     // conn.player is only set at auth, never after applyMatchResult — re-read
     // so matchFound's `you` reflects Elo earned earlier this session.
     if (!c.isBot) c.player = (await getPlayer(c.player.id)) || c.player;
+    // Record where this player's live match runs so a reconnect (even to a
+    // different instance) can find it. We own this match.
+    if (!c.isBot) playerMatchSet(c.player.id, id, INSTANCE_ID);
   }
   const [pa, pb] = match.members;
   // `polite` is the WebRTC perfect-negotiation tiebreaker — exactly one peer
@@ -947,6 +1173,44 @@ function rebindAndResume(match, oldConn, newSocket) {
   }
 }
 
+// Cross-instance variant of rebindAndResume: the disconnected member is a
+// REMOTE proxy (this match's owner is us; the player reconnected to another
+// instance). Re-point the proxy at the new socket id / instance, migrate the
+// socket-id-keyed state, re-affirm the binding on the player's instance, and
+// drive authed + match:resume back over the adapter.
+function rebindRemoteAndResume(match, oldConn, newSocketId, newInstance) {
+  const oldSocketId = oldConn.socket?.id || null;
+  oldConn.socket = makeRemoteSocket(newSocketId);
+  oldConn.remoteInstance = newInstance;
+  oldConn.disconnected = false;
+  oldConn.disconnectedAt = null;
+
+  if (oldSocketId && match.rematchVotes.has(oldSocketId)) {
+    match.rematchVotes.set(newSocketId, match.rematchVotes.get(oldSocketId));
+    match.rematchVotes.delete(oldSocketId);
+  }
+  if (oldSocketId && match.reported.has(oldSocketId)) {
+    match.reported.set(newSocketId, match.reported.get(oldSocketId));
+    match.reported.delete(oldSocketId);
+  }
+
+  oldConn.socket.join(match.id);
+  publishToInstance(newInstance, {
+    type: "matchBind",
+    socketId: newSocketId,
+    matchId: match.id,
+    ownerInstance: INSTANCE_ID,
+  });
+  oldConn.socket.emit("authed", { player: publicPlayer(oldConn.player) });
+  oldConn.socket.emit("match:resume", buildResumePayload(match, oldConn));
+
+  if (match.pendingOpponentGone) {
+    const reason = match.pendingOpponentGone;
+    match.pendingOpponentGone = null;
+    parkAfterOpponentGone(match, reason, [oldConn]);
+  }
+}
+
 function buildResumePayload(match, you) {
   const opponent = match.members.find((m) => m !== you);
   const now = Date.now();
@@ -1048,10 +1312,11 @@ function onRematchVote(match, conn, yes) {
     // requeue them (PvP) or back to lobby (vs a bot).
     if (!conn.isBot) {
       conn.socket.leave(match.id);
-      conn.matchId = null;
-      conn.status = "idle";
       conn.socket.emit("match:over", { reason: "declined" });
-      if (!match.bot) enqueue(conn.socket.id);
+      // Requeue a PvP decliner (find a new opponent); a bot decliner just
+      // goes back to the lobby. memberIdle routes the requeue to the right
+      // instance for a remote member.
+      memberIdle(conn, { requeue: !match.bot });
     }
     // The other player didn't choose to leave → keep them parked on the
     // result screen with a manual "Find new opponent" button.
@@ -1083,11 +1348,12 @@ function dissolveMatch(match, { requeue = false, reason } = {}, leaverId) {
   for (const c of match.members) {
     if (c.isBot) continue; // bot has no socket/state to clean up
     c.socket.leave(match.id);
-    c.matchId = null;
-    c.status = "idle";
-    if (c.socket.id === leaverId) continue;
+    if (c.socket.id === leaverId) {
+      memberIdle(c);
+      continue;
+    }
     c.socket.emit("match:over", { reason: reason || "ended" });
-    if (requeue) enqueue(c.socket.id);
+    memberIdle(c, { requeue });
   }
 }
 
@@ -1166,9 +1432,8 @@ function parkAfterOpponentGone(match, reason, survivors) {
   for (const c of survivors) {
     if (!c || c.isBot) continue;
     c.socket.leave(match.id);
-    c.matchId = null;
-    c.status = "idle";
     c.socket.emit("opponent:gone", { reason });
+    memberIdle(c);
   }
 }
 
@@ -1203,11 +1468,10 @@ function handleDisconnectDuringMatch(match, goneConn) {
     matches.delete(match.id);
     if (!other.isBot) {
       other.socket.leave(match.id);
-      other.matchId = null;
-      other.status = "idle";
       other.socket.emit("match:over", {
         reason: "opponent_disconnected_pre_round",
       });
+      memberIdle(other);
     }
     return;
   }
@@ -1259,9 +1523,8 @@ async function voluntaryForfeit(match, leaverConn) {
     for (const c of match.members) {
       if (c.isBot) continue;
       c.socket.leave(match.id);
-      c.matchId = null;
-      c.status = "idle";
       c.socket.emit("match:over", { reason: "match_cancelled" });
+      memberIdle(c);
     }
     return;
   }
@@ -1350,7 +1613,7 @@ function scheduleBotPlay(match) {
 }
 
 // ---------- Invite (private friend match) ----------
-function genInviteCode() {
+async function genInviteCode() {
   const A = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   let code;
   do {
@@ -1358,30 +1621,290 @@ function genInviteCode() {
       { length: 6 },
       () => A[Math.floor(Math.random() * A.length)]
     ).join("");
-  } while (invites.has(code));
+  } while (await inviteExists(code));
   return code;
 }
 
-function removeInvitesBy(socketId) {
-  for (const [code, rec] of invites)
-    if (rec.hostSocketId === socketId) invites.delete(code);
+// Remove whatever invite this host created and clear their local lobby
+// state. The host socket is always local to whichever instance created the
+// invite, so the conn-status reset stays in-process.
+async function removeInvitesBy(socketId) {
+  await inviteRemoveByHost(socketId);
   const c = conns.get(socketId);
-  if (c && c.status === "inviting") c.status = "idle";
+  if (c && c.status === "inviting") {
+    c.status = "idle";
+    c.inviteCode = null;
+  }
 }
 
-// Drop stale invites so a host who wandered off doesn't leave a dead link.
-setInterval(() => {
-  const cutoff = Date.now() - INVITE_TTL_MS;
-  for (const [code, rec] of invites)
-    if (rec.createdAt < cutoff) {
-      invites.delete(code);
-      const h = conns.get(rec.hostSocketId);
-      if (h && h.status === "inviting") {
-        h.status = "idle";
-        h.socket.emit("inviteExpired");
+// Redis expires invite keys for us (INVITE_TTL_S). This sweep only handles
+// the UX side: a host still parked on the invite screen after their code
+// lapsed gets told so the lobby resets. We check each locally-connected
+// "inviting" host against the store; in the no-Redis fallback inviteExists
+// applies the same TTL by createdAt. Each instance sweeps its own hosts.
+setInterval(async () => {
+  for (const c of conns.values()) {
+    if (c.status !== "inviting" || !c.inviteCode) continue;
+    try {
+      if (!(await inviteExists(c.inviteCode))) {
+        c.status = "idle";
+        c.inviteCode = null;
+        c.socket.emit("inviteExpired");
+      }
+    } catch {
+      /* transient — next sweep retries */
+    }
+  }
+}, 60_000).unref?.();
+
+// Cross-instance invite join: the host's socket lives on another instance, so
+// we can't call createMatch() locally. Implemented in Phase 4d (the host
+// instance owns the match; this joiner becomes a remote member). Placeholder
+// host is local. Hands off to the host's instance, which owns the match and
+// holds this joiner as a remote member.
+async function joinRemoteInvite(rec, joinerConn) {
+  await publishToInstance(rec.hostInstance, {
+    type: "spawnInvite",
+    hostSocketId: rec.hostSocketId,
+    joiner: {
+      socketId: joinerConn.socket.id,
+      playerId: joinerConn.player.id,
+      instanceId: INSTANCE_ID,
+    },
+  });
+}
+
+// ---------- In-match events (shared by local sockets + forwarded) ----------
+// When a player is on a DIFFERENT instance than their match's owner, their
+// in-match events land on their own instance, which forwards them here over
+// the cluster bus. These take (match, conn) so the identical code path serves
+// a local socket and a forwarded event; `conn` is whichever member object is
+// in match.members (a real conn or a remote proxy).
+function relayInMatch(match, conn, event, payload) {
+  const other = match.members.find((x) => x !== conn);
+  if (other) other.socket.emit(event, payload);
+}
+
+async function handleVideoFailed(match, conn, url) {
+  // Also serve alternates during the RESULT replay so a failed result-page
+  // video can swap locally — the round is already settled, nothing to void.
+  if (!["preparing", "countdown", "playing", "result"].includes(match.state))
+    return;
+  const slug = match.opening?.anime?.slug;
+  if (!slug)
+    return conn.socket.emit("round:altVideo", { url: null, audioUrl: null });
+  if (!match.altLinksP)
+    match.altLinksP = getCachedThemeMediaLinks(slug, match.opening?.theme?.slug);
+  let links = [];
+  try {
+    links = (await match.altLinksP) || [];
+  } catch {
+    links = [];
+  }
+  if (!matches.has(match.id)) return; // round/match ended while fetching
+  // Find the failed entry by video link, then advance one; fall back to
+  // "anything but the failed video" if the client reported an unknown URL.
+  const i = links.findIndex((x) => x.video === url);
+  const next =
+    i >= 0 ? links[i + 1] : links.find((x) => x.video && x.video !== url);
+  conn.socket.emit("round:altVideo", {
+    url: next?.video || null,
+    audioUrl: next?.audio || null,
+  });
+}
+
+async function handleLeaveMatch(match, conn) {
+  // Forfeit applies in every in-match phase; the result/vote screen just
+  // sends the leaver home and parks the survivor. (See the leaveMatch socket
+  // handler comment for the full rationale.)
+  if (
+    match.state === "playing" ||
+    match.state === "countdown" ||
+    match.state === "preparing"
+  ) {
+    await voluntaryForfeit(match, conn);
+  } else {
+    const other = match.members.find((x) => x !== conn);
+    clearTimers(match);
+    matches.delete(match.id);
+    conn.socket.leave(match.id);
+    conn.socket.emit("match:over", { reason: "you_left" });
+    memberIdle(conn);
+    parkAfterOpponentGone(match, "opponent_left", [other]);
+  }
+}
+
+// Forward an in-match event to the instance that owns the match (used when a
+// player's match object lives on another instance).
+function forwardMatchEvent(conn, event, payload) {
+  if (conn?.remoteMatch)
+    publishToInstance(conn.remoteMatch.owner, {
+      type: "matchEvent",
+      matchId: conn.remoteMatch.matchId,
+      socketId: conn.socket.id,
+      event,
+      payload,
+    });
+}
+
+// Run a forwarded event against the owned match, as if it had arrived locally.
+function dispatchForwardedEvent(match, conn, event, payload = {}) {
+  switch (event) {
+    case "guess":
+      return handleGuess(match, conn, payload);
+    case "rematchVote":
+      return onRematchVote(match, conn, payload.yes);
+    case "mediaDuration":
+      return onMediaDuration(match, conn.socket.id, payload.ms);
+    case "roundUnplayable":
+      return abortUnplayable(match);
+    case "round:videoFailed":
+      return handleVideoFailed(match, conn, payload.url);
+    case "rtc:signal":
+      return relayInMatch(match, conn, "rtc:signal", payload);
+    case "rtc:state":
+      return relayInMatch(match, conn, "rtc:peerState", {
+        cam: !!payload.cam,
+        mic: !!payload.mic,
+      });
+    case "leaveMatch":
+      return handleLeaveMatch(match, conn);
+    case "forfeit":
+      return voluntaryForfeit(match, conn);
+    case "playerDisconnect":
+      return handleDisconnectDuringMatch(match, conn);
+  }
+}
+
+// ---------- Cluster message dispatch (cross-instance coordination) ----------
+// A player's instance learns its socket is now in a remote match.
+function onMatchBind({ socketId, matchId, ownerInstance }) {
+  const c = conns.get(socketId);
+  if (!c) {
+    // Player vanished before the bind landed — let the owner tear down.
+    publishToInstance(ownerInstance, {
+      type: "matchEvent",
+      matchId,
+      socketId,
+      event: "playerDisconnect",
+      payload: {},
+    });
+    return;
+  }
+  c.status = "match";
+  c.matchId = matchId;
+  c.remoteMatch = { matchId, owner: ownerInstance };
+  c.socket.join(matchId); // fast local room join so broadcasts reach us
+}
+
+// The owner released this player from a remote match.
+function onMatchUnbind({ socketId, requeue }) {
+  const c = conns.get(socketId);
+  if (!c) return;
+  c.status = "idle";
+  c.matchId = null;
+  c.remoteMatch = null;
+  if (requeue) enqueue(socketId);
+}
+
+// We own the match; run a forwarded in-match event from a remote member.
+function onForwardedMatchEvent({ matchId, socketId, event, payload }) {
+  const m = matches.get(matchId);
+  if (!m) return;
+  const c = m.members.find((mc) => mc.socket.id === socketId);
+  if (!c) return;
+  Promise.resolve(dispatchForwardedEvent(m, c, event, payload)).catch((err) =>
+    console.error("forwarded event", event + ":", err.message)
+  );
+}
+
+// A player reconnected on another instance; we own their match. Re-point our
+// remote proxy at the new socket and resume them. If the match is gone, tell
+// their instance to fall back to a normal (fresh-lobby) auth.
+function onRemoteReconnect({ playerId, matchId, socketId, instanceId }) {
+  const m = matches.get(matchId);
+  const oldConn = m
+    ? m.members.find((mc) => mc.isRemote && mc.player?.id === playerId)
+    : null;
+  if (!m || !oldConn) {
+    publishToInstance(instanceId, { type: "reconnectFailed", socketId });
+    return;
+  }
+  rebindRemoteAndResume(m, oldConn, socketId, instanceId);
+}
+
+// A friend joined our host's invite from another instance.
+async function onSpawnInvite({ hostSocketId, joiner }) {
+  const host = conns.get(hostSocketId);
+  if (!host || host.status !== "inviting") {
+    publishToInstance(joiner.instanceId, {
+      type: "inviteFailed",
+      socketId: joiner.socketId,
+    });
+    return;
+  }
+  host.inviteCode = null;
+  await createMatch(host, makeRemoteConn(joiner));
+}
+
+if (clusterEnabled) {
+  onClusterMessage((msg) => {
+    switch (msg.type) {
+      case "spawnMatch":
+        spawnMatch(msg.a, msg.b).catch((e) =>
+          console.error("spawnMatch:", e.message)
+        );
+        break;
+      case "spawnBot":
+        spawnBotMatch(msg.entry).catch((e) =>
+          console.error("spawnBot:", e.message)
+        );
+        break;
+      case "requeue":
+        requeueEntry(msg.entry).catch((e) =>
+          console.error("requeue:", e.message)
+        );
+        break;
+      case "spawnInvite":
+        onSpawnInvite(msg).catch((e) =>
+          console.error("spawnInvite:", e.message)
+        );
+        break;
+      case "inviteFailed": {
+        const c = conns.get(msg.socketId);
+        if (c)
+          c.socket.emit("inviteError", {
+            message: "That invite link is invalid or expired.",
+          });
+        break;
+      }
+      case "matchBind":
+        onMatchBind(msg);
+        break;
+      case "matchUnbind":
+        onMatchUnbind(msg);
+        break;
+      case "matchEvent":
+        onForwardedMatchEvent(msg);
+        break;
+      case "remoteReconnect":
+        onRemoteReconnect(msg);
+        break;
+      case "reconnectFailed": {
+        // Owner couldn't resume us — drop the optimistic remote-match state we
+        // set in the auth handler and land in a normal fresh lobby.
+        const c = conns.get(msg.socketId);
+        if (c) {
+          c.status = "idle";
+          c.matchId = null;
+          c.remoteMatch = null;
+          if (c.player) c.socket.emit("authed", { player: publicPlayer(c.player) });
+        }
+        break;
       }
     }
-}, 60_000).unref?.();
+  });
+}
 
 // ---------- Per-socket throttle ----------
 // A single malicious socket could spam invite creation, joinInvite brute
@@ -1429,6 +1952,9 @@ io.on("connection", (socket) => {
       return;
     }
     c.player = row;
+    // Record where this player is so other instances can find them (invite
+    // joins, cross-instance reconnect). No-op single-instance.
+    setPresence(row.id, socket.id);
 
     // Reconnect: is this player a member of an active match with
     // .disconnected=true? If so, rebind the existing conn (the one in
@@ -1443,6 +1969,35 @@ io.on("connection", (socket) => {
       if (oldConn) {
         rebindAndResume(m, oldConn, socket);
         return;
+      }
+    }
+
+    // Cross-instance resume: the player's live match may be owned by ANOTHER
+    // instance (a cross-instance random pair or invite). Ask that instance to
+    // re-point its remote member at this socket and drive the resume. With
+    // sticky sessions this is rare, but without it a refresh mid cross-instance
+    // match would lose the round.
+    if (clusterEnabled) {
+      const pm = await playerMatchGet(row.id);
+      if (pm && !isLocalInstance(pm.owner)) {
+        if (await instanceIsAlive(pm.owner)) {
+          // Optimistically mark our conn as in that remote match so its
+          // in-match events forward; the owner sends authed + match:resume.
+          c.status = "match";
+          c.matchId = pm.matchId;
+          c.remoteMatch = { matchId: pm.matchId, owner: pm.owner };
+          socket.join(pm.matchId);
+          publishToInstance(pm.owner, {
+            type: "remoteReconnect",
+            playerId: row.id,
+            matchId: pm.matchId,
+            socketId: socket.id,
+            instanceId: INSTANCE_ID,
+          });
+          return;
+        }
+        // Owner is dead → the match is unrecoverable; drop the stale pointer.
+        playerMatchClear(row.id, pm.matchId);
       }
     }
 
@@ -1474,7 +2029,7 @@ io.on("connection", (socket) => {
       return;
     }
     if (!rateOk(c, "queue", 10, 10 / 60)) return;
-    if (c.status === "inviting") removeInvitesBy(socket.id);
+    if (c.status === "inviting") await removeInvitesBy(socket.id);
     if (c.status === "idle") await enqueue(socket.id);
   });
 
@@ -1498,34 +2053,52 @@ io.on("connection", (socket) => {
         await voluntaryForfeit(m, c);
         return;
       }
+      // Remote-owned match: let the owner decide (voluntaryForfeit guards the
+      // state, so a too-late click is a harmless no-op there).
+      if (!m && c.remoteMatch) {
+        forwardMatchEvent(c, "forfeit", {});
+        return;
+      }
     }
-    dequeue(socket.id);
+    await dequeue(socket.id);
   });
 
   // ---- Private friend match via invite link (ranked) ----
-  socket.on("createInvite", () => {
+  socket.on("createInvite", async () => {
     const c = conns.get(socket.id);
     if (!c?.player) {
       socket.emit("authError", { message: "Sign in first." });
       return;
     }
     // 5 invites per minute is plenty; anything more is creating dead links
-    // to chew memory (each lives INVITE_TTL_MS = 15min).
+    // (each lives INVITE_TTL_MS = 15min).
     if (!rateOk(c, "createInvite", 5, 5 / 60)) return;
-    if (c.status === "queued") dequeue(socket.id);
+    if (c.status === "queued") await dequeue(socket.id);
     if (c.status !== "idle") {
       socket.emit("inviteError", { message: "Finish your current match first." });
       return;
     }
-    removeInvitesBy(socket.id);
-    const code = genInviteCode();
-    invites.set(code, { hostSocketId: socket.id, createdAt: Date.now() });
+    await removeInvitesBy(socket.id);
+    const code = await genInviteCode();
+    await inviteCreate({
+      code,
+      hostSocketId: socket.id,
+      hostPlayerId: c.player.id,
+      hostInstance: INSTANCE_ID,
+      createdAt: Date.now(),
+    });
+    // The conn may have gone away during the awaits; bail if so.
+    if (!conns.has(socket.id)) {
+      await inviteDelete(code);
+      return;
+    }
     c.status = "inviting";
+    c.inviteCode = code;
     socket.emit("inviteCreated", { code });
   });
 
-  socket.on("cancelInvite", () => {
-    removeInvitesBy(socket.id);
+  socket.on("cancelInvite", async () => {
+    await removeInvitesBy(socket.id);
     socket.emit("inviteCancelled");
   });
 
@@ -1538,84 +2111,73 @@ io.on("connection", (socket) => {
     // Stops brute-force code discovery (30-char alphabet, 6 chars =
     // ~729M codes — 20 attempts/min/socket makes this infeasible).
     if (!rateOk(c, "joinInvite", 20, 20 / 60)) return;
-    if (c.status === "queued") dequeue(socket.id);
-    if (c.status === "inviting") removeInvitesBy(socket.id);
+    if (c.status === "queued") await dequeue(socket.id);
+    if (c.status === "inviting") await removeInvitesBy(socket.id);
     if (c.status !== "idle") {
       socket.emit("inviteError", { message: "Finish your current match first." });
       return;
     }
-    const rec = invites.get(String(code || "").toUpperCase());
-    const host = rec && conns.get(rec.hostSocketId);
-    if (!rec || !host || host.status !== "inviting") {
+    const upper = String(code || "").toUpperCase();
+    const rec = await inviteGet(upper);
+    if (!rec) {
       socket.emit("inviteError", {
         message: "That invite link is invalid or expired.",
       });
       return;
     }
-    if (host.socket.id === socket.id) {
+    if (rec.hostSocketId === socket.id) {
       socket.emit("inviteError", { message: "You can't join your own invite." });
       return;
     }
-    invites.delete(String(code).toUpperCase());
-    removeInvitesBy(host.socket.id);
-    await createMatch(host, c);
+    // Claim the code so a double-join can't pair the host twice.
+    await inviteDelete(upper);
+
+    if (isLocalInstance(rec.hostInstance)) {
+      const host = conns.get(rec.hostSocketId);
+      if (!host || host.status !== "inviting") {
+        socket.emit("inviteError", {
+          message: "That invite link is invalid or expired.",
+        });
+        return;
+      }
+      host.inviteCode = null;
+      await createMatch(host, c);
+    } else {
+      // Host is on another instance — handed off to the cross-instance match
+      // path (Phase 4d). In single-instance prod this branch never runs.
+      await joinRemoteInvite(rec, c);
+    }
   });
 
+  // In-match events: handle locally if WE own the match, otherwise forward to
+  // the owner instance (the player is on us, the match object is elsewhere).
   socket.on("mediaDuration", ({ ms } = {}) => {
     const c = conns.get(socket.id);
-    const m = c?.matchId && matches.get(c.matchId);
+    const m = matches.get(c?.matchId);
     if (m) onMediaDuration(m, socket.id, ms);
+    else forwardMatchEvent(c, "mediaDuration", { ms });
   });
 
   // The opening wouldn't play on this client → scrap the round, requeue both.
   socket.on("roundUnplayable", async () => {
     const c = conns.get(socket.id);
-    const m = c?.matchId && matches.get(c.matchId);
+    const m = matches.get(c?.matchId);
     if (m) await abortUnplayable(m);
+    else forwardMatchEvent(c, "roundUnplayable", {});
   });
 
-  // A video link wouldn't play here — hand back the next encode of the
-  // SAME OP slot, plus its paired audio file when AnimeThemes has one.
-  // Alternates are fetched once per round (lazily, only on a failure) and
-  // cached on the match. The client escalates to roundUnplayable when we
-  // run out (url: null). Each alternate carries both video + audio so the
-  // client can try the lighter audio file before the full video for that
-  // encoding, same audio-first preference as the primary.
+  // A video link wouldn't play here — hand back the next encode of the SAME
+  // OP slot (handleVideoFailed). Rate limiting stays at the edge (here) so a
+  // flood is dropped on the player's own instance before any forwarding.
   socket.on("round:videoFailed", async ({ url } = {}) => {
     const c = conns.get(socket.id);
-    // Each first call per round can trigger an AnimeThemes fetch
-    // (mitigated by the alt-list cache, but defense in depth). 10
-    // failures/round is already pessimistic; 20-capacity, 0.5/s refill
+    // Each first call per round can trigger an AnimeThemes fetch (mitigated
+    // by the alt-list cache, but defense in depth). 20-capacity, 0.5/s refill
     // lets a real codec-cascade through without throttling.
     if (!rateOk(c, "round:videoFailed", 20, 0.5)) return;
-    const m = c?.matchId && matches.get(c.matchId);
-    if (!m) return;
-    // Also serve alternates during the RESULT replay so a failed result-page
-    // video can swap in another encode locally — no need to void anything
-    // since the round is already settled.
-    if (!["preparing", "countdown", "playing", "result"].includes(m.state)) return;
-    const slug = m.opening?.anime?.slug;
-    if (!slug)
-      return socket.emit("round:altVideo", { url: null, audioUrl: null });
-    if (!m.altLinksP)
-      m.altLinksP = getCachedThemeMediaLinks(slug, m.opening?.theme?.slug);
-    let links = [];
-    try {
-      links = (await m.altLinksP) || [];
-    } catch {
-      links = [];
-    }
-    if (!matches.has(m.id)) return; // round/match ended while fetching
-    // Find the failed entry by video link (what the client reported), then
-    // advance one. Falls back to "anything but the failed video" if the
-    // client reported an unknown URL (alt-video URL the cache doesn't list).
-    const i = links.findIndex((x) => x.video === url);
-    const next =
-      i >= 0 ? links[i + 1] : links.find((x) => x.video && x.video !== url);
-    socket.emit("round:altVideo", {
-      url: next?.video || null,
-      audioUrl: next?.audio || null,
-    });
+    const m = matches.get(c?.matchId);
+    if (m) await handleVideoFailed(m, c, url);
+    else forwardMatchEvent(c, "round:videoFailed", { url });
   });
 
   socket.on("guess", async ({ animeId, guessText } = {}) => {
@@ -1623,73 +2185,53 @@ io.on("connection", (socket) => {
     // Fast typing during a heated round is legit (capacity 20, refill 5/s
     // = 300/min sustained). Anything above that is a flood — drop.
     if (!rateOk(c, "guess", 20, 5)) return;
-    const m = c?.matchId && matches.get(c.matchId);
+    const m = matches.get(c?.matchId);
     if (m) await handleGuess(m, c, { animeId, guessText });
+    else forwardMatchEvent(c, "guess", { animeId, guessText });
   });
 
   socket.on("rematchVote", ({ yes } = {}) => {
     const c = conns.get(socket.id);
-    const m = c?.matchId && matches.get(c.matchId);
+    const m = matches.get(c?.matchId);
     if (m) onRematchVote(m, c, yes);
+    else forwardMatchEvent(c, "rematchVote", { yes });
   });
 
   // ---- WebRTC signaling: relay verbatim to the other player in the match
   // (opt-in camera/mic). The server never inspects media, only forwards SDP
   // / ICE between exactly the two matched peers.
-  const relayToOpponent = (event, payload) => {
+  socket.on("rtc:signal", (payload) => {
     const c = conns.get(socket.id);
-    const m = c?.matchId && matches.get(c.matchId);
-    const other = m?.members.find((x) => x !== c);
-    if (other) other.socket.emit(event, payload);
-  };
-  socket.on("rtc:signal", (payload) => relayToOpponent("rtc:signal", payload));
-  socket.on("rtc:state", ({ cam, mic } = {}) =>
-    relayToOpponent("rtc:peerState", { cam: !!cam, mic: !!mic })
-  );
+    const m = matches.get(c?.matchId);
+    if (m) relayInMatch(m, c, "rtc:signal", payload);
+    else forwardMatchEvent(c, "rtc:signal", payload);
+  });
+  socket.on("rtc:state", ({ cam, mic } = {}) => {
+    const c = conns.get(socket.id);
+    const m = matches.get(c?.matchId);
+    if (m) relayInMatch(m, c, "rtc:peerState", { cam: !!cam, mic: !!mic });
+    else forwardMatchEvent(c, "rtc:state", { cam: !!cam, mic: !!mic });
+  });
 
   // Voluntarily leave a match (e.g., user clicked "back to queue").
   socket.on("leaveMatch", async () => {
     const c = conns.get(socket.id);
-    const m = c?.matchId && matches.get(c.matchId);
-    if (!m) return;
-    // Forfeit applies in EVERY in-match phase, not just playing/countdown.
-    // Home-click during preparing (buffering the opening) is just as
-    // voluntary as during the 3-2-1 or mid-round — the "no Elo" carve-out
-    // is for real network disconnects only. voluntaryForfeit handles the
-    // tiny ms-race case where state==="preparing" before the opening is
-    // picked (cancels cleanly, no Elo because we can't compute it without
-    // round info) — that's fine, the user is leaving before there's
-    // anything to forfeit FROM.
-    if (
-      m.state === "playing" ||
-      m.state === "countdown" ||
-      m.state === "preparing"
-    ) {
-      // Leaving mid-match forfeits the round — but, unlike a real disconnect,
-      // the match stays alive so both can still rematch each other.
-      await voluntaryForfeit(m, c);
-    } else {
-      // Leaving from the result/vote screen: the leaver goes back to the
-      // lobby; the other player stays parked on the result (their choice
-      // when to re-queue).
-      const other = m.members.find((x) => x !== c);
-      clearTimers(m);
-      matches.delete(m.id);
-      c.socket.leave(m.id);
-      c.matchId = null;
-      c.status = "idle";
-      c.socket.emit("match:over", { reason: "you_left" });
-      parkAfterOpponentGone(m, "opponent_left", [other]);
-    }
+    const m = matches.get(c?.matchId);
+    if (m) await handleLeaveMatch(m, c);
+    else forwardMatchEvent(c, "leaveMatch", {});
   });
 
   socket.on("disconnect", () => {
     const c = conns.get(socket.id);
     if (!c) return;
+    if (c.player?.id) clearPresence(c.player.id, socket.id);
     dequeue(socket.id);
     removeInvitesBy(socket.id);
-    const m = c.matchId && matches.get(c.matchId);
+    const m = matches.get(c.matchId);
     if (m) handleDisconnectDuringMatch(m, c);
+    // If our match is owned elsewhere, tell the owner this player dropped so
+    // it can mark them disconnected (round keeps running; reconnect resumes).
+    else if (c.remoteMatch) forwardMatchEvent(c, "playerDisconnect", {});
     conns.delete(socket.id);
   });
 });
@@ -1703,6 +2245,64 @@ setInterval(
   () => tryMatch().catch((err) => console.error("matchmaker tick:", err.message)),
   MATCHMAKER_TICK_MS
 ).unref?.();
+
+// Elect/renew the single matchmaker leader. Run once at boot so there's a
+// leader immediately, then on a heartbeat well inside LEADER_TTL_MS. No-op
+// single-instance (amLeader is permanently true).
+if (clusterEnabled) {
+  leaderHeartbeat().catch((err) => console.error("leader heartbeat:", err.message));
+  setInterval(
+    () => leaderHeartbeat().catch((err) => console.error("leader heartbeat:", err.message)),
+    LEADER_HEARTBEAT_MS
+  ).unref?.();
+}
+
+// Cluster maintenance (no-op single-instance):
+//  - heartbeat THIS instance's liveness key so peers know we're alive
+//  - keep presence + match-registry keys alive for active local players
+//  - detect a DEAD owner instance and release the players we have who were
+//    paired into a match it was running (their opponent + match are gone)
+if (clusterEnabled) {
+  instanceHeartbeat().catch(() => {});
+  setInterval(() => instanceHeartbeat().catch(() => {}), 5_000).unref?.();
+
+  setInterval(() => {
+    // presence for everyone connected here
+    for (const c of conns.values())
+      if (c.player?.id) refreshPresence(c.player.id);
+    // match-registry for members of matches WE own
+    for (const m of matches.values())
+      for (const mem of m.members)
+        if (!mem.isBot && mem.player?.id) playerMatchRefresh(mem.player.id);
+  }, 30_000).unref?.();
+
+  setInterval(
+    () => sweepDeadOwners().catch((err) => console.error("dead-owner sweep:", err.message)),
+    7_000
+  ).unref?.();
+}
+
+// Release any local players whose match is owned by an instance that has
+// stopped heartbeating: that process is gone, taking the match object and
+// (usually) their opponent with it. Dedupe the liveness check by owner.
+async function sweepDeadOwners() {
+  const owners = new Set();
+  for (const c of conns.values())
+    if (c.remoteMatch?.owner) owners.add(c.remoteMatch.owner);
+  if (owners.size === 0) return;
+  const dead = new Set();
+  for (const o of owners) if (!(await instanceIsAlive(o))) dead.add(o);
+  if (dead.size === 0) return;
+  for (const c of conns.values()) {
+    if (c.remoteMatch && dead.has(c.remoteMatch.owner)) {
+      c.socket.leave(c.remoteMatch.matchId);
+      c.socket.emit("match:over", { reason: "opponent_disconnected" });
+      c.status = "idle";
+      c.matchId = null;
+      c.remoteMatch = null;
+    }
+  }
+}
 
 server.listen(PORT, () => {
   console.log(`Anime Opening Elo (multiplayer) listening on port ${PORT}`);

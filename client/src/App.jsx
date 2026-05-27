@@ -49,6 +49,22 @@ if (import.meta.env.VITE_TURN_URL) {
   });
 }
 
+// Mic constraints: the browser usually enables these by default, but asking
+// explicitly is more consistent across devices and avoids echo/feedback when
+// someone plays the round audio out loud while their mic is hot.
+const MIC_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+// Keep the webcam modest — it's a small picture-in-picture, so a low cap
+// saves uplink bandwidth (less contention = more reliable audio too).
+const CAM_CONSTRAINTS = {
+  width: { ideal: 640 },
+  height: { ideal: 480 },
+  frameRate: { ideal: 24, max: 30 },
+};
+
 // Anime-flavoured rank tiers across Elo ranges (everyone starts at 100).
 // Escalating aura: dim/cool at the bottom → cool-vivid → hot → radiant.
 // Every tier is a distinct hue/brightness so no two look alike.
@@ -260,10 +276,18 @@ export default function App() {
   const [micOn, setMicOn] = useState(false);
   const [hasRemote, setHasRemote] = useState(false);
   const [peerAV, setPeerAV] = useState({ cam: false, mic: false });
+  const peerAVRef = useRef(peerAV); // latest peer A/V for stable-closure reads
+  // True when the opponent's audio/video was blocked by the browser's
+  // autoplay policy (we show a one-tap "unmute opponent" affordance).
+  const [remoteBlocked, setRemoteBlocked] = useState(false);
 
   // ---------- Socket setup ----------
   useEffect(() => {
-    const socket = io({ path: "/socket.io" });
+    // websocket-only: the server runs multiple instances behind a load
+    // balancer with no sticky sessions, so a single persistent WebSocket
+    // (vs. multi-request HTTP long-polling) is required to stay pinned to one
+    // instance. The Redis adapter handles cross-instance delivery.
+    const socket = io({ path: "/socket.io", transports: ["websocket"] });
     socketRef.current = socket;
 
     socket.on("connect", () => {
@@ -779,9 +803,15 @@ export default function App() {
 
     // WebRTC signaling (perfect negotiation).
     socket.on("rtc:signal", (payload) => onSignal(payload));
-    socket.on("rtc:peerState", (s) =>
-      setPeerAV({ cam: !!s.cam, mic: !!s.mic })
-    );
+    socket.on("rtc:peerState", (s) => {
+      const next = { cam: !!s.cam, mic: !!s.mic };
+      peerAVRef.current = next;
+      setPeerAV(next);
+      // The opponent just turned on their mic/cam — make sure their feed is
+      // actually playing (it may have been blocked, or paused with no track).
+      if (next.cam || next.mic) playRemote();
+      else setRemoteBlocked(false);
+    });
 
     return () => socket.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1130,6 +1160,7 @@ export default function App() {
     midoriTimer.current = setTimeout(() => setMidoriShown(true), 30_000);
   }
   function tapToPlay() {
+    playRemote(); // same gesture also unblocks the opponent's A/V feed
     const v = videoRef.current;
     if (!v) return;
     v.volume = volume;
@@ -1253,7 +1284,7 @@ export default function App() {
     const rv = remoteVideoRef.current;
     if (rv && rv.srcObject !== remoteStreamRef.current) {
       rv.srcObject = remoteStreamRef.current;
-      rv.play().catch(() => {}); // kick autoplay (esp. remote audio)
+      playRemote(); // kick autoplay (esp. remote audio)
     }
   }, [camOn, micOn, hasRemote, phase]);
 
@@ -1274,6 +1305,28 @@ export default function App() {
   }
 
   // ---------- WebRTC ----------
+  // Force the remote (opponent) audio/video element to play. Browsers block
+  // autoplay-with-sound until a user gesture, and a single failed play() on
+  // mount means you silently never hear the opponent — the classic "their mic
+  // doesn't work" that's really blocked playback on the LISTENER's side. We
+  // re-kick this on track arrival, on the peer enabling A/V, on our own
+  // mic/cam toggle, and on tap-to-play; if it's still blocked while the peer
+  // has a feed up, we surface a one-tap affordance.
+  function playRemote() {
+    const rv = remoteVideoRef.current;
+    if (!rv) return;
+    rv.muted = false;
+    const p = rv.play();
+    if (p && p.catch)
+      p.then(
+        () => setRemoteBlocked(false),
+        () => {
+          const pav = peerAVRef.current;
+          if (pav?.mic || pav?.cam) setRemoteBlocked(true);
+        }
+      );
+  }
+
   function ensurePeer() {
     if (pcRef.current) return pcRef.current;
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -1317,6 +1370,7 @@ export default function App() {
       )
         remoteVideoRef.current.srcObject = remote;
       setHasRemote(true);
+      playRemote();
     };
     pc.onconnectionstatechange = () => {
       if (["failed", "closed", "disconnected"].includes(pc.connectionState))
@@ -1365,37 +1419,67 @@ export default function App() {
     }
   }
 
+  // Toggle mic/cam INDEPENDENTLY. The old version stopped + re-acquired BOTH
+  // tracks on every toggle, so flipping your camera would re-grab (and briefly
+  // glitch/drop) your mic. Now each device is acquired/released on its own and
+  // replaceTrack swaps just that sender — no renegotiation, no collateral
+  // damage to the other track. We keep one persistent local MediaStream as the
+  // preview container and add/remove tracks in place.
   async function applyMedia(nextCam, nextMic) {
     ensurePeer();
+    if (!localStreamRef.current) localStreamRef.current = new MediaStream();
+    const ls = localStreamRef.current;
+    const dropTracks = (kind) => {
+      const sel = kind === "audio" ? ls.getAudioTracks() : ls.getVideoTracks();
+      sel.forEach((t) => {
+        t.stop();
+        ls.removeTrack(t);
+      });
+    };
     try {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-      }
-      let stream = null;
-      if (nextCam || nextMic) {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: nextCam,
-          audio: nextMic,
+      // --- MIC ---
+      if (nextMic && !micOn) {
+        const s = await navigator.mediaDevices.getUserMedia({
+          audio: MIC_CONSTRAINTS,
         });
+        dropTracks("audio");
+        const track = s.getAudioTracks()[0] || null;
+        if (track) ls.addTrack(track);
+        await audioSenderRef.current?.replaceTrack(track);
+      } else if (!nextMic && micOn) {
+        dropTracks("audio");
+        await audioSenderRef.current?.replaceTrack(null);
       }
-      localStreamRef.current = stream;
-      // replaceTrack swaps what we send WITHOUT renegotiation — this is the
-      // whole reason there's no more one-way-audio glare.
-      await audioSenderRef.current?.replaceTrack(
-        stream?.getAudioTracks()[0] || null
-      );
-      await videoSenderRef.current?.replaceTrack(
-        stream?.getVideoTracks()[0] || null
-      );
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-      setCamOn(nextCam);
-      setMicOn(nextMic);
-      socketRef.current?.emit("rtc:state", { cam: nextCam, mic: nextMic });
+      // --- CAM ---
+      if (nextCam && !camOn) {
+        const s = await navigator.mediaDevices.getUserMedia({
+          video: CAM_CONSTRAINTS,
+        });
+        dropTracks("video");
+        const track = s.getVideoTracks()[0] || null;
+        if (track) ls.addTrack(track);
+        await videoSenderRef.current?.replaceTrack(track);
+      } else if (!nextCam && camOn) {
+        dropTracks("video");
+        await videoSenderRef.current?.replaceTrack(null);
+      }
+
+      // Only (re)bind if it changed — reassigning the same stream can make
+      // some browsers repaint the <video>, which is the flicker we're killing.
+      if (localVideoRef.current && localVideoRef.current.srcObject !== ls)
+        localVideoRef.current.srcObject = ls;
+      // Reflect what we ACTUALLY hold (a failed grab below would diverge).
+      const haveMic = ls.getAudioTracks().length > 0;
+      const haveCam = ls.getVideoTracks().length > 0;
+      setMicOn(haveMic);
+      setCamOn(haveCam);
+      socketRef.current?.emit("rtc:state", { cam: haveCam, mic: haveMic });
+      playRemote(); // this toggle is a user gesture — good moment to unblock
     } catch (e) {
+      // Only the device we were turning ON failed; the other stays intact.
       setNotice("Couldn't access camera/mic (permission denied?).");
-      setCamOn(false);
-      setMicOn(false);
+      setMicOn(ls.getAudioTracks().length > 0);
+      setCamOn(ls.getVideoTracks().length > 0);
     }
   }
   const toggleCam = () => applyMedia(!camOn, micOn);
@@ -1422,6 +1506,8 @@ export default function App() {
     setMicOn(false);
     setHasRemote(false);
     setPeerAV({ cam: false, mic: false });
+    peerAVRef.current = { cam: false, mic: false };
+    setRemoteBlocked(false);
   }
 
   const submitGuess = useCallback(() => {
@@ -2266,6 +2352,15 @@ export default function App() {
                     muted
                     className="cam-local"
                   />
+                  {remoteBlocked && (peerAV.mic || peerAV.cam) && (
+                    <button
+                      type="button"
+                      className="cam-unmute"
+                      onClick={playRemote}
+                    >
+                      🔊 Tap to hear opponent
+                    </button>
+                  )}
                 </div>
               )}
               {phase === PHASE.PREPARE && (

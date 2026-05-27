@@ -5,17 +5,28 @@
 # Deploy: push this repo to GitHub, then on render.com →
 #   New → Blueprint → pick the repo. Render reads this file.
 #
-# NOTE: persistent disks require a paid instance (the `starter` plan, ~$7/mo).
-# Render's free plan has NO disk and sleeps after ~15 min idle (a cold start
-# drops any in-progress match). For a free deploy, remove the `disk:` block
-# and set `plan: free` — but the SQLite DB then resets on every deploy.
+# Multi-instance (Phase 4/5): the service runs 2+ Node processes behind
+# Render's load balancer. Cross-instance coordination (shared matchmaking
+# queue, invites, presence, cross-instance match play, and broadcasts) all
+# flow through Redis — so REDIS_URL MUST be set for multi-instance to behave
+# correctly. With 2 instances, a deploy is zero-downtime (Render restarts them
+# one at a time) and one instance crashing doesn't take the whole site down.
+#
+# IMPORTANT: there is no persistent disk below anymore. With multiple
+# instances a local disk isn't shared, so all durable state lives in Postgres
+# (DATABASE_URL) and avatars in Cloudflare R2 (R2_* vars). If R2 is NOT
+# configured the server falls back to writing avatars to local disk, which
+# does NOT work across instances — configure R2 before scaling past 1.
 services:
   - type: web
     name: anime-opening-elo
     runtime: node
-    plan: starter
+    # Standard (2 CPU / 2GB). Two of these (~$50/mo) is the resilient baseline;
+    # raise numInstances or switch to a scaling block to grow past ~10k.
+    plan: standard
     region: oregon
     branch: main
+    numInstances: 2
     buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
@@ -23,13 +34,19 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22.20.0"
+      # Ephemeral scratch dir (no persistent disk anymore — see note above).
+      # Only used for the auto-generated session secret, which you should NOT
+      # rely on when running multiple instances (see SESSION_SECRET below).
       - key: DATA_DIR
         value: /var/data
       # Google OAuth Web client ID. Not a secret (it ships to every browser
       # and is origin-restricted to your domains), so keeping it here is fine.
       - key: GOOGLE_CLIENT_ID
         value: 657498565875-34hionbg133e8t7ggj1v5u1t95htjec5.apps.googleusercontent.com
-      # Optional: auto-generated into DATA_DIR if left unset.
+      # REQUIRED for multi-instance. If unset, EACH instance auto-generates
+      # its own secret into its own (now ephemeral, per-instance) DATA_DIR, so
+      # a session minted by one instance is rejected by the others and users
+      # get logged out at random. Set one shared value in the dashboard.
       - key: SESSION_SECRET
         sync: false
       # Postgres connection string. Set this in the Render dashboard to
@@ -39,11 +56,11 @@ services:
       # refuse to boot without it.
       - key: DATABASE_URL
         sync: false
-      # Cloudflare R2 avatar storage. All FIVE must be set for R2 mode;
-      # if any is missing the server transparently falls back to writing
-      # avatars to the persistent disk (Phase 1 behavior). The two
-      # secret values (access key + secret) use sync: false so they're
-      # only set in the Render dashboard, never committed here.
+      # Cloudflare R2 avatar storage. All FIVE must be set for R2 mode; if any
+      # is missing the server falls back to writing avatars to LOCAL disk,
+      # which is per-instance and NOT shared — so an avatar uploaded on one
+      # instance 404s from the others. Configure R2 before scaling past 1
+      # instance. The two secret values use sync: false (dashboard only).
       - key: R2_BUCKET
         sync: false
       - key: R2_ENDPOINT
@@ -54,14 +71,12 @@ services:
         sync: false
       - key: R2_SECRET_ACCESS_KEY
         sync: false
-      # Phase 3: Upstash Redis connection string (rediss://...). Required
-      # for the Socket.IO Redis adapter (multi-instance broadcasts),
-      # cross-instance rate limits, and shared search cache. Without it
-      # the server falls back to single-instance in-memory equivalents,
-      # so you can deploy this code before signing up for Upstash.
+      # Upstash Redis connection string (rediss://...). REQUIRED for
+      # multi-instance: it backs the Socket.IO adapter (cross-instance
+      # broadcasts), the shared matchmaking queue + matchmaker leader,
+      # invites, presence, cross-instance match play, and distributed rate
+      # limits. Without it the server runs as a single self-contained
+      # instance (all the above fall back to in-process) — fine for num
+      # Instances: 1, broken for 2+.
       - key: REDIS_URL
         sync: false
-    disk:
-      name: data
-      mountPath: /var/data
-      sizeGB: 1
