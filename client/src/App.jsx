@@ -2084,7 +2084,7 @@ export default function App() {
                 </a>
                 <a
                   className="about-icon"
-                  href="REPLACE_WITH_YOUR_DONATION_LINK"
+                  href="https://ko-fi.com/alantang"
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="Donate to support the project"
@@ -2588,6 +2588,15 @@ export default function App() {
           MyAnimeList
         </a>
         .
+        <div className="footer-legal">
+          <a href="/privacy.html" target="_blank" rel="noreferrer">
+            Privacy Policy
+          </a>
+          <span aria-hidden="true"> · </span>
+          <a href="/terms.html" target="_blank" rel="noreferrer">
+            Terms &amp; Conditions
+          </a>
+        </div>
       </div>
     </div>
   );

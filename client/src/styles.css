@@ -446,6 +446,16 @@ button.danger:hover:not(:disabled) {
   text-align: center;
 }
 .footer-note a { color: var(--muted); }
+.footer-legal {
+  margin-top: 6px;
+}
+.footer-legal a {
+  color: var(--muted);
+  text-decoration: underline;
+}
+.footer-legal a:hover {
+  color: var(--text);
+}
 
 /* ---------- Multiplayer additions ---------- */
 .notice {
