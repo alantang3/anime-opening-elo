@@ -60,11 +60,21 @@ if (r2Enabled) {
   console.log("Avatar storage: local disk fallback (R2 env not configured)");
 }
 
-// Local fallback dir. Always created — even in R2 mode the /avatars static
-// route stays mounted so any legacy /avatars/<id>.<ext> rows from before
-// Phase 2 (or written during a fallback deploy) keep resolving.
+// Local fallback dir — only needed when R2 is OFF (dev / single-instance with
+// a writable disk). In R2 mode we never write locally, and DATA_DIR may not
+// be writable at all (e.g. a multi-instance deploy with no persistent disk),
+// so creating it is both pointless and dangerous: an EACCES here used to crash
+// the whole server on boot. Skip it under R2, and never let it be fatal.
 export const LOCAL_AVATAR_DIR = path.join(DATA_DIR, "avatars");
-fs.mkdirSync(LOCAL_AVATAR_DIR, { recursive: true });
+if (!r2Enabled) {
+  try {
+    fs.mkdirSync(LOCAL_AVATAR_DIR, { recursive: true });
+  } catch (err) {
+    console.warn(
+      `Avatar local dir unavailable (${LOCAL_AVATAR_DIR}): ${err.code || err.message} — uploads will fail until R2 is configured`
+    );
+  }
+}
 
 const EXTS = ["png", "jpg", "webp"];
 const PUBLIC_BASE = (R2_PUBLIC_BASE_URL || "").replace(/\/$/, "");

@@ -2082,6 +2082,46 @@ export default function App() {
                     <circle cx="17.5" cy="6.5" r="0.6" fill="currentColor" stroke="none" />
                   </svg>
                 </a>
+                <a
+                  className="about-icon"
+                  href="REPLACE_WITH_YOUR_DONATION_LINK"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="Donate to support the project"
+                  title="Support the project"
+                >
+                  {/* Donation box: coin above, heart on the box */}
+                  <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                    {/* coin dropping in */}
+                    <circle cx="12" cy="5" r="2.3" fill="currentColor" />
+                    {/* box */}
+                    <rect
+                      x="4"
+                      y="10"
+                      width="16"
+                      height="11"
+                      rx="2"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    />
+                    {/* coin slot */}
+                    <line
+                      x1="9.3"
+                      y1="12.4"
+                      x2="14.7"
+                      y2="12.4"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                    />
+                    {/* heart */}
+                    <path
+                      fill="currentColor"
+                      d="M12 19.4c-2.3-1.7-3.7-2.8-3.7-4.2 0-.9.7-1.5 1.5-1.5.7 0 1.4.4 2.2 1.3.8-.9 1.5-1.3 2.2-1.3.8 0 1.5.6 1.5 1.5 0 1.4-1.4 2.5-3.7 4.2z"
+                    />
+                  </svg>
+                </a>
               </div>
             </div>
           </div>

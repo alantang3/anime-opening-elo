@@ -26,7 +26,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(__dirname, "data");
-fs.mkdirSync(DATA_DIR, { recursive: true });
+// Best-effort: with no persistent disk on a multi-instance deploy, DATA_DIR
+// (e.g. /var/data) may be missing or read-only. That's fine when SESSION_SECRET
+// is set in the env and avatars use R2 — nothing writes here. Never let it
+// crash boot (it used to take down the whole server with EACCES).
+try {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+} catch (err) {
+  console.warn(
+    `DATA_DIR not writable (${DATA_DIR}): ${err.code || err.message} — ok if SESSION_SECRET is set and avatars use R2`
+  );
+}
 
 export const DEFAULT_ELO = 100; // everyone starts at the floor
 export const ELO_FLOOR = 100; // and can never drop below it

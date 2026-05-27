@@ -157,7 +157,11 @@ async function tick() {
   return n > 0;
 }
 
-export async function startIngester() {
+// `shouldTick` gates the recurring work so only ONE instance actually
+// ingests (the matchmaker leader). The loop keeps running everywhere but
+// no-ops on non-leaders, so it resumes immediately if leadership moves here.
+// Default true = single-instance behavior unchanged.
+export async function startIngester(shouldTick = () => true) {
   if (running) return;
   running = true;
   // Smart-start: resume the Jikan cursor based on how many popularity
@@ -179,6 +183,12 @@ export async function startIngester() {
     /* non-fatal */
   }
   const loop = async () => {
+    // Not the leader right now → skip the work (no API calls, no writes) but
+    // keep the loop alive so we take over if leadership lands here.
+    if (!shouldTick()) {
+      setTimeout(loop, TICK_WARM_MS).unref?.();
+      return;
+    }
     let ok = false;
     try {
       ok = await tick();

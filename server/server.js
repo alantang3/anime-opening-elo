@@ -2308,7 +2308,10 @@ server.listen(PORT, () => {
   console.log(`Anime Opening Elo (multiplayer) listening on port ${PORT}`);
   // Fire-and-forget the ingester. .catch swallows DB blips so the listen
   // callback doesn't print an unhandled-rejection warning during cold boot.
-  startIngester().catch((err) =>
+  // Only the matchmaker leader actually ingests (shared Postgres pool), so 2+
+  // instances don't double the AnimeThemes/Jikan API load. amLeader is always
+  // true single-instance, so behavior there is unchanged.
+  startIngester(() => amLeader).catch((err) =>
     console.error("startIngester:", err.message)
   );
 });
