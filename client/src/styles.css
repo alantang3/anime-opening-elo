@@ -563,6 +563,38 @@ button.danger:hover:not(:disabled) {
   gap: 8px;
   margin-bottom: 12px;
 }
+/* Left (cam/mic) and right (peer status) groups flex equally so the Report
+   button sits dead-centre under the screen. */
+.av-side {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.av-right {
+  justify-content: flex-end;
+}
+/* Same pill shape as the Sign-in / Play-as-guest CTAs, red + white. */
+.report-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 22px;
+  background: #e5484d;
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.report-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 26px rgba(229, 72, 77, 0.45);
+  filter: brightness(1.06);
+}
 .av-btn {
   flex: none;
   display: inline-flex;
@@ -586,10 +618,13 @@ button.danger:hover:not(:disabled) {
 .av-peer {
   color: var(--muted);
   font-size: 12px;
-  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .av-peer-icons {
   display: inline-flex;
@@ -598,6 +633,54 @@ button.danger:hover:not(:disabled) {
 }
 .av-peer-icons svg {
   display: block;
+}
+/* Report dialog */
+.report-desc {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+}
+.report-text {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 14px;
+}
+.report-text:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.report-submit {
+  margin-top: 14px;
+  width: 100%;
+  padding: 11px;
+  border: none;
+  border-radius: 999px;
+  background: #e5484d;
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+}
+.report-submit:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.report-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.report-thanks {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.55;
+  margin: 0;
 }
 /* Camera/mic feeds render INSIDE .player-wrap (no separate box). Selectors
    are scoped under .player-wrap so they out-specify `.player-wrap video`. */

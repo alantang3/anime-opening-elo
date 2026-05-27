@@ -81,6 +81,12 @@ import {
   playerMatchRefresh,
   playerMatchGet,
   playerMatchClear,
+  setPlayerIp,
+  refreshPlayerIp,
+  getPlayerIp,
+  isIpBanned,
+  banRemainingMs,
+  reportTarget,
 } from "./cluster.js";
 
 // ---------- Tunables ----------
@@ -725,6 +731,9 @@ function memberIdle(c, { requeue = false } = {}) {
   }
   c.status = "idle";
   c.matchId = null;
+  // NOTE: deliberately keep c.opponentId so you can still report a player who
+  // left/disconnected while you're parked on the result screen. It's
+  // overwritten when your next match starts (createMatch).
   if (requeue) enqueue(c.socket.id);
 }
 
@@ -757,6 +766,9 @@ async function createMatch(a, b) {
     // (or were never queued, for invite matches); nothing to remove here.
     c.status = "match";
     c.matchId = id;
+    // Who this player can report (their opponent). Stable across the match.
+    const other = match.members.find((x) => x !== c);
+    c.opponentId = other?.player?.id || null;
     c.socket.join(id);
     if (c.isRemote) {
       // Tell the member's instance it's now in our match so it forwards the
@@ -766,6 +778,7 @@ async function createMatch(a, b) {
         socketId: c.socket.id,
         matchId: id,
         ownerInstance: INSTANCE_ID,
+        opponentPlayerId: other?.player?.id || null,
       });
     }
     // conn.player is only set at auth, never after applyMatchResult — re-read
@@ -1778,7 +1791,7 @@ function dispatchForwardedEvent(match, conn, event, payload = {}) {
 
 // ---------- Cluster message dispatch (cross-instance coordination) ----------
 // A player's instance learns its socket is now in a remote match.
-function onMatchBind({ socketId, matchId, ownerInstance }) {
+function onMatchBind({ socketId, matchId, ownerInstance, opponentPlayerId }) {
   const c = conns.get(socketId);
   if (!c) {
     // Player vanished before the bind landed — let the owner tear down.
@@ -1794,6 +1807,7 @@ function onMatchBind({ socketId, matchId, ownerInstance }) {
   c.status = "match";
   c.matchId = matchId;
   c.remoteMatch = { matchId, owner: ownerInstance };
+  c.opponentId = opponentPlayerId || null;
   c.socket.join(matchId); // fast local room join so broadcasts reach us
 }
 
@@ -1804,6 +1818,8 @@ function onMatchUnbind({ socketId, requeue }) {
   c.status = "idle";
   c.matchId = null;
   c.remoteMatch = null;
+  // Keep c.opponentId so a parked survivor can still report a player who left
+  // (overwritten when their next match starts).
   if (requeue) enqueue(socketId);
 }
 
@@ -1928,6 +1944,15 @@ function rateOk(conn, event, capacity, refillPerSec) {
   return true;
 }
 
+// Real client IP behind Render's proxy. trust proxy is on for Express, but
+// Socket.IO reads the raw socket, so parse X-Forwarded-For ourselves (first
+// hop = the client). Used for report-based IP bans.
+function clientIpOf(socket) {
+  const xff = socket.handshake.headers["x-forwarded-for"];
+  if (xff) return String(xff).split(",")[0].trim();
+  return socket.handshake.address || "";
+}
+
 // ---------- Socket wiring ----------
 io.on("connection", (socket) => {
   conns.set(socket.id, {
@@ -1936,6 +1961,7 @@ io.on("connection", (socket) => {
     status: "idle",
     matchId: null,
     buckets: {},
+    ip: clientIpOf(socket),
   });
 
   // Account required: authenticate the socket with our session token
@@ -1952,9 +1978,17 @@ io.on("connection", (socket) => {
       return;
     }
     c.player = row;
+    // Banned IPs can't sign in to play. (Bans are by IP, shared across
+    // instances; they auto-lift after the ban window.)
+    if (await isIpBanned(c.ip)) {
+      socket.emit("banned", { untilMs: await banRemainingMs(c.ip) });
+      return;
+    }
     // Record where this player is so other instances can find them (invite
-    // joins, cross-instance reconnect). No-op single-instance.
+    // joins, cross-instance reconnect) and so reports can resolve their IP.
+    // No-op single-instance.
     setPresence(row.id, socket.id);
+    setPlayerIp(row.id, c.ip);
 
     // Reconnect: is this player a member of an active match with
     // .disconnected=true? If so, rebind the existing conn (the one in
@@ -2029,6 +2063,10 @@ io.on("connection", (socket) => {
       return;
     }
     if (!rateOk(c, "queue", 10, 10 / 60)) return;
+    if (await isIpBanned(c.ip)) {
+      socket.emit("banned", { untilMs: await banRemainingMs(c.ip) });
+      return;
+    }
     if (c.status === "inviting") await removeInvitesBy(socket.id);
     if (c.status === "idle") await enqueue(socket.id);
   });
@@ -2221,6 +2259,37 @@ io.on("connection", (socket) => {
     else forwardMatchEvent(c, "leaveMatch", {});
   });
 
+  // Report the current opponent. The ban is by IP and needs REPORTS_TO_BAN
+  // (3) DISTINCT reporters, so one person can't ban anyone solo. Reasons are
+  // logged for the operator to review.
+  socket.on("report", async ({ reason } = {}) => {
+    const c = conns.get(socket.id);
+    if (!c?.player) return;
+    if (!rateOk(c, "report", 3, 3 / 60)) return;
+    const oppId = c.opponentId;
+    // No opponent, or a bot (no real IP) — ack silently so the dialog closes.
+    if (!oppId || String(oppId).startsWith("bot:")) {
+      socket.emit("report:ack");
+      return;
+    }
+    const oppIp = await getPlayerIp(oppId);
+    if (!oppIp) {
+      socket.emit("report:ack");
+      return;
+    }
+    const reporterKey = c.ip || c.player.id;
+    const cleanReason = String(reason || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 500);
+    const res = await reportTarget(oppIp, reporterKey);
+    console.log(
+      `[report] by=${c.player.id} target=${oppId} reporters=${res.count} ` +
+        `banned=${res.banned} reason=${JSON.stringify(cleanReason)}`
+    );
+    socket.emit("report:ack");
+  });
+
   socket.on("disconnect", () => {
     const c = conns.get(socket.id);
     if (!c) return;
@@ -2267,9 +2336,12 @@ if (clusterEnabled) {
   setInterval(() => instanceHeartbeat().catch(() => {}), 5_000).unref?.();
 
   setInterval(() => {
-    // presence for everyone connected here
+    // presence + IP registry for everyone connected here
     for (const c of conns.values())
-      if (c.player?.id) refreshPresence(c.player.id);
+      if (c.player?.id) {
+        refreshPresence(c.player.id);
+        refreshPlayerIp(c.player.id);
+      }
     // match-registry for members of matches WE own
     for (const m of matches.values())
       for (const mem of m.members)

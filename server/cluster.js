@@ -482,3 +482,119 @@ export async function releaseLeader(name) {
     /* it'll expire on its own */
   }
 }
+
+// ---------- player IP registry + reports / bans ----------
+// We track reports and bans by IP, shared across instances via Redis (so a ban
+// holds everywhere). To report the OPPONENT we need their IP even when they're
+// on another instance, so each authed player's IP is stored by playerId.
+const kPlayerIp = (playerId) => `playerip:${playerId}`;
+const kBan = (ip) => `ban:${ip}`;
+const kReporters = (ip) => `reporters:${ip}`;
+
+export const REPORTS_TO_BAN = 3; // distinct reporters needed
+export const BAN_SECONDS = 7 * 24 * 60 * 60; // 1 week
+const PLAYER_IP_TTL_S = 24 * 60 * 60; // refreshed on the presence heartbeat
+// Reports decay on a rolling window so an IP isn't permanently 2/3-reported
+// (IPs get reassigned). Hitting REPORTS_TO_BAN within this window bans; after
+// the ban expires the counter is already cleared, so they start fresh.
+const REPORTERS_TTL_S = 7 * 24 * 60 * 60;
+
+const localPlayerIp = new Map(); // playerId -> ip
+const localBans = new Map(); // ip -> expiresAtMs
+const localReporters = new Map(); // ip -> Set(reporterKey)
+
+export async function setPlayerIp(playerId, ip) {
+  if (!playerId || !ip) return;
+  if (!clusterEnabled) {
+    localPlayerIp.set(playerId, ip);
+    return;
+  }
+  try {
+    await redis.set(kPlayerIp(playerId), ip, "EX", PLAYER_IP_TTL_S);
+  } catch (err) {
+    console.error("cluster setPlayerIp:", err.message);
+  }
+}
+
+export async function refreshPlayerIp(playerId) {
+  if (!clusterEnabled || !playerId) return;
+  try {
+    await redis.expire(kPlayerIp(playerId), PLAYER_IP_TTL_S);
+  } catch {
+    /* next heartbeat retries */
+  }
+}
+
+export async function getPlayerIp(playerId) {
+  if (!playerId) return null;
+  if (!clusterEnabled) return localPlayerIp.get(playerId) || null;
+  try {
+    return (await redis.get(kPlayerIp(playerId))) || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function isIpBanned(ip) {
+  if (!ip) return false;
+  if (!clusterEnabled) {
+    const exp = localBans.get(ip);
+    if (exp && exp > Date.now()) return true;
+    if (exp) localBans.delete(ip);
+    return false;
+  }
+  try {
+    return (await redis.exists(kBan(ip))) === 1;
+  } catch {
+    return false;
+  }
+}
+
+export async function banRemainingMs(ip) {
+  if (!ip) return 0;
+  if (!clusterEnabled) {
+    const exp = localBans.get(ip);
+    return exp ? Math.max(0, exp - Date.now()) : 0;
+  }
+  try {
+    const t = await redis.pttl(kBan(ip));
+    return t > 0 ? t : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Record a report against `reportedIp` from a distinct `reporterKey`. When
+// REPORTS_TO_BAN distinct reporters accumulate, the IP is banned for
+// BAN_SECONDS and the counter is cleared. Returns { banned, count }.
+export async function reportTarget(reportedIp, reporterKey) {
+  if (!reportedIp || !reporterKey) return { banned: false, count: 0 };
+  if (!clusterEnabled) {
+    let set = localReporters.get(reportedIp);
+    if (!set) {
+      set = new Set();
+      localReporters.set(reportedIp, set);
+    }
+    set.add(reporterKey);
+    if (set.size >= REPORTS_TO_BAN) {
+      localBans.set(reportedIp, Date.now() + BAN_SECONDS * 1000);
+      localReporters.delete(reportedIp);
+      return { banned: true, count: set.size };
+    }
+    return { banned: false, count: set.size };
+  }
+  try {
+    await redis.sadd(kReporters(reportedIp), reporterKey);
+    await redis.expire(kReporters(reportedIp), REPORTERS_TTL_S);
+    const count = await redis.scard(kReporters(reportedIp));
+    if (count >= REPORTS_TO_BAN) {
+      await redis.set(kBan(reportedIp), "1", "EX", BAN_SECONDS);
+      await redis.del(kReporters(reportedIp));
+      return { banned: true, count };
+    }
+    return { banned: false, count };
+  } catch (err) {
+    console.error("cluster reportTarget:", err.message);
+    return { banned: false, count: 0 };
+  }
+}

@@ -317,6 +317,11 @@ export default function App() {
   // True when the opponent's audio/video was blocked by the browser's
   // autoplay policy (we show a one-tap "unmute opponent" affordance).
   const [remoteBlocked, setRemoteBlocked] = useState(false);
+  // Report dialog + ban state.
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportReason, setReportReason] = useState("");
+  const [reportSent, setReportSent] = useState(false);
+  const [banned, setBanned] = useState(null); // { untilMs } when IP-banned
 
   // ---------- Socket setup ----------
   useEffect(() => {
@@ -839,6 +844,11 @@ export default function App() {
     });
 
     // WebRTC signaling (perfect negotiation).
+    // Report acknowledged by the server (also fires for bot/no-op reports).
+    socket.on("report:ack", () => setReportSent(true));
+    // This IP is banned (too many reports). Block play and show why.
+    socket.on("banned", ({ untilMs } = {}) => setBanned({ untilMs: untilMs || 0 }));
+
     socket.on("rtc:signal", (payload) => onSignal(payload));
     socket.on("rtc:peerState", (s) => {
       const next = { cam: !!s.cam, mic: !!s.mic };
@@ -1835,6 +1845,75 @@ export default function App() {
         />
       )}
 
+      {/* ---- Report player dialog ---- */}
+      {reportOpen && (
+        <div className="modal-backdrop" onClick={() => setReportOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Report player</h3>
+              <button className="modal-x" onClick={() => setReportOpen(false)}>
+                ✕
+              </button>
+            </div>
+            {reportSent ? (
+              <p className="report-thanks">
+                Thanks — your report was submitted. Repeated reports from
+                different players result in a temporary ban.
+              </p>
+            ) : (
+              <>
+                <p className="report-desc">
+                  Tell us why you're reporting{" "}
+                  {opponent?.nickname || "this player"}.
+                </p>
+                <textarea
+                  className="report-text"
+                  value={reportReason}
+                  maxLength={500}
+                  placeholder="Reason (e.g. inappropriate camera, harassment, cheating)…"
+                  onChange={(e) => setReportReason(e.target.value)}
+                  autoFocus
+                />
+                <button
+                  className="report-submit"
+                  disabled={!reportReason.trim()}
+                  onClick={() =>
+                    socketRef.current?.emit("report", {
+                      reason: reportReason.trim(),
+                    })
+                  }
+                >
+                  Submit report
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ---- Temporary ban notice (blocks play) ---- */}
+      {banned && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <div className="modal-head">
+              <h3>You're temporarily suspended</h3>
+            </div>
+            <p className="report-desc">
+              Your access has been suspended because multiple players reported
+              you.
+              {banned.untilMs > 0
+                ? ` It lifts in about ${Math.max(
+                    1,
+                    Math.ceil(banned.untilMs / 86400000)
+                  )} day(s).`
+                : ""}{" "}
+              If you believe this is a mistake, contact{" "}
+              <a href="mailto:alandalitang@gmail.com">alandalitang@gmail.com</a>.
+            </p>
+          </div>
+        </div>
+      )}
+
       {guestOpen && (
         <div className="modal-backdrop" onClick={() => !guestBusy && setGuestOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -2478,35 +2557,50 @@ export default function App() {
               {roundInfo?.round ? `Round ${roundInfo.round}` : " "}
             </div>
 
-            {/* ---- Camera / mic with opponent ---- */}
+            {/* ---- Camera / mic + report, with opponent status ---- */}
             <div className="av-bar">
+              <div className="av-side av-left">
+                <button
+                  className={"av-btn" + (camOn ? " on" : "")}
+                  onClick={toggleCam}
+                  aria-label={camOn ? "Turn camera off" : "Turn camera on"}
+                  title={camOn ? "Turn camera off" : "Turn camera on"}
+                >
+                  <CamGlyph slashed={!camOn} />
+                </button>
+                <button
+                  className={"av-btn" + (micOn ? " on" : "")}
+                  onClick={toggleMic}
+                  aria-label={micOn ? "Turn microphone off" : "Turn microphone on"}
+                  title={micOn ? "Turn microphone off" : "Turn microphone on"}
+                >
+                  <MicGlyph slashed={!micOn} />
+                </button>
+              </div>
               <button
-                className={"av-btn" + (camOn ? " on" : "")}
-                onClick={toggleCam}
-                aria-label={camOn ? "Turn camera off" : "Turn camera on"}
-                title={camOn ? "Turn camera off" : "Turn camera on"}
+                className="report-btn"
+                onClick={() => {
+                  setReportReason("");
+                  setReportSent(false);
+                  setReportOpen(true);
+                }}
+                title="Report this player"
               >
-                <CamGlyph slashed={!camOn} />
+                Report
               </button>
-              <button
-                className={"av-btn" + (micOn ? " on" : "")}
-                onClick={toggleMic}
-                aria-label={micOn ? "Turn microphone off" : "Turn microphone on"}
-                title={micOn ? "Turn microphone off" : "Turn microphone on"}
-              >
-                <MicGlyph slashed={!micOn} />
-              </button>
-              <span className="av-peer">
-                {opponent?.nickname}:{" "}
-                {peerAV.cam || peerAV.mic ? (
-                  <span className="av-peer-icons">
-                    {peerAV.cam && <CamGlyph size={15} />}
-                    {peerAV.mic && <MicGlyph size={15} />}
-                  </span>
-                ) : (
-                  "—"
-                )}
-              </span>
+              <div className="av-side av-right">
+                <span className="av-peer">
+                  {opponent?.nickname}:{" "}
+                  {peerAV.cam || peerAV.mic ? (
+                    <span className="av-peer-icons">
+                      {peerAV.cam && <CamGlyph size={15} />}
+                      {peerAV.mic && <MicGlyph size={15} />}
+                    </span>
+                  ) : (
+                    "—"
+                  )}
+                </span>
+              </div>
             </div>
 
             {phase === PHASE.PLAYING && (
