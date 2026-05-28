@@ -70,6 +70,15 @@ export const MANUAL_ALIASES = [
     aliases: ["saiki k", "saiki", "saikik"],
   },
 
+  // Kaguya-sama — every season title contains either "Kaguya-sama" (Japanese
+  // or English) or the subtitle "Kokurasetai" / "Love is War". Fans
+  // overwhelmingly just type "kaguya". Match any of the three franchise
+  // anchors so every season/movie maps to the same alias set.
+  {
+    matches: /\b(kaguya sama|kokurasetai|love is war)\b/,
+    aliases: ["kaguya", "kaguya sama", "kokurasetai", "love is war"],
+  },
+
   // JoJo — every season is "JoJo's Bizarre Adventure: <subtitle>" or
   // its Japanese name "JoJo no Kimyou na Bouken". The subtitle split
   // already lands the franchise root in the set, but fans
