@@ -309,6 +309,11 @@ export default function App() {
   const videoSenderRef = useRef(null); // replaceTrack (no renegotiation)
   const remoteStreamRef = useRef(null);
   const pendingIceRef = useRef([]); // ICE buffered until remoteDescription set
+  // ICE servers used by every RTCPeerConnection we make. Starts at the static
+  // defaults (STUN + free openrelay); `/api/turn` upgrades this to Cloudflare
+  // Realtime credentials on connect, which makes peer-to-peer reliable across
+  // NATs. Falls back to the defaults if the server isn't configured.
+  const iceServersRef = useRef(ICE_SERVERS);
   const [camOn, setCamOn] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [hasRemote, setHasRemote] = useState(false);
@@ -335,6 +340,15 @@ export default function App() {
     socket.on("connect", () => {
       setConnected(true);
       if (tokenRef.current) socket.emit("auth", { token: tokenRef.current });
+      // Refresh ICE servers from /api/turn — Cloudflare credentials are
+      // short-lived, so we re-fetch on each (re)connect.
+      fetch("/api/turn", { credentials: "include" })
+        .then((r) => r.ok ? r.json() : null)
+        .then((data) => {
+          if (Array.isArray(data?.iceServers) && data.iceServers.length)
+            iceServersRef.current = data.iceServers;
+        })
+        .catch(() => {});
     });
     socket.on("disconnect", () => {
       setConnected(false);
@@ -1376,7 +1390,7 @@ export default function App() {
 
   function ensurePeer() {
     if (pcRef.current) return pcRef.current;
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
     pcRef.current = pc;
     pendingIceRef.current = [];
 
@@ -2769,7 +2783,7 @@ function ResultPanel({ result, votes, opponent, onVote, oppGone, onRequeue, yuzu
               ? "Time's up — nobody got it"
               : result.outcome === "forfeit"
               ? won
-                ? "Opponent forfeited — no contest"
+                ? "Opponent forfeited"
                 : "You forfeited"
               : result.outcome === "disconnect"
               ? won

@@ -207,6 +207,52 @@ app.get("/api/config", (_req, res) =>
   res.json({ googleClientId: GOOGLE_CLIENT_ID })
 );
 
+// Cloudflare Realtime TURN: mints short-lived ICE credentials so the client
+// can establish reliable peer-to-peer (camera/mic) across NATs. The API token
+// MUST stay server-side. We cache the credentials in-process (24h TTL, refresh
+// after 23h) so we don't call Cloudflare on every page load. Falls back to
+// returning an empty list if not configured — the client still has the STUN +
+// free openrelay defaults baked in.
+let turnCache = null; // { iceServers, refreshAt }
+async function getTurnCredentials() {
+  const tokenId = process.env.CF_TURN_TOKEN_ID;
+  const apiToken = process.env.CF_TURN_API_TOKEN;
+  if (!tokenId || !apiToken) return null;
+  if (turnCache && turnCache.refreshAt > Date.now()) return turnCache.iceServers;
+  const r = await fetch(
+    `https://rtc.live.cloudflare.com/v1/turn/keys/${tokenId}/credentials/generate`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ttl: 24 * 60 * 60 }),
+    }
+  );
+  if (!r.ok) throw new Error(`Cloudflare TURN HTTP ${r.status}`);
+  const data = await r.json();
+  // Cloudflare returns { iceServers: {...} } or { iceServers: [...] };
+  // normalize to an array so the client can hand it straight to RTCPeerConnection.
+  let ice = data?.iceServers;
+  if (!ice) throw new Error("Cloudflare TURN: no iceServers in response");
+  if (!Array.isArray(ice)) ice = [ice];
+  turnCache = {
+    iceServers: ice,
+    refreshAt: Date.now() + 23 * 60 * 60 * 1000,
+  };
+  return ice;
+}
+app.get("/api/turn", async (_req, res) => {
+  try {
+    const ice = await getTurnCredentials();
+    res.json({ iceServers: ice || [] });
+  } catch (err) {
+    console.error("api/turn:", err.message);
+    res.json({ iceServers: [] });
+  }
+});
+
 // Exchange a Google credential for our session token. Accepts either an ID
 // token (legacy GIS button) or an OAuth access token (our custom button).
 app.post("/api/auth/google", limitGoogleAuth, async (req, res) => {
