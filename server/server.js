@@ -102,6 +102,15 @@ const BOT_WAIT_MS = Number(process.env.BOT_WAIT_MS) || 10_000;
 const BOT_ELO_JITTER = 40; // bot rating = your Elo ± up to this
 const BOT_BASE_ACCURACY = 0.55; // chance the bot gets it, before popularity
 const INVITE_TTL_MS = 15 * 60 * 1000;
+// Max concurrent socket connections from one IP, per instance. Anything above
+// this is almost certainly a connection flood (each socket otherwise lands in
+// the `conns` map and gets its own rate-limit buckets, so the per-socket
+// throttles alone don't bound memory). Set generously so legit shared IPs
+// (CGNAT, dorms, a household behind one NAT, multiple tabs, reconnect overlap)
+// aren't hit — real per-IP usage is small (guest signups are capped at 5/IP/day
+// and a session is one socket). Per-instance is enough: each instance just
+// protects its own memory/fd budget.
+const MAX_SOCKETS_PER_IP = Number(process.env.MAX_SOCKETS_PER_IP) || 50;
 
 // Plausible player handles — deliberately NOT obviously a bot.
 const BOT_NAMES = [
@@ -477,6 +486,10 @@ if (clusterEnabled) {
 // ---------- Connection + match state ----------
 // socket.id -> { socket, player, status: 'idle'|'queued'|'match', matchId }
 const conns = new Map();
+// ip -> count of live sockets from that IP on THIS instance. Bounds the
+// connection-flood DoS (see MAX_SOCKETS_PER_IP); incremented on accept,
+// decremented on disconnect.
+const ipSocketCount = new Map();
 // The FIFO matchmaking queue now lives in Redis (server/cluster.js) so all
 // instances share one pool; a single leader instance runs the pairing tick.
 // Falls back to an in-process map when REDIS_URL is unset.
@@ -1991,23 +2004,49 @@ function rateOk(conn, event, capacity, refillPerSec) {
 }
 
 // Real client IP behind Render's proxy. trust proxy is on for Express, but
-// Socket.IO reads the raw socket, so parse X-Forwarded-For ourselves (first
-// hop = the client). Used for report-based IP bans.
+// Socket.IO reads the raw socket, so parse X-Forwarded-For ourselves. Used for
+// report-based IP bans and the per-IP connection cap, so it MUST NOT be
+// client-spoofable.
+//
+// Render APPENDS the real client IP to any incoming X-Forwarded-For, so a
+// forged "X-Forwarded-For: 1.2.3.4" arrives as "1.2.3.4, <realIP>". The
+// LAST entry is the one our trusted front proxy added (the real client);
+// the leftmost is attacker-controlled. We trust exactly one proxy hop here,
+// matching `app.set("trust proxy", 1)` — so take the rightmost XFF entry,
+// NOT [0]. Taking [0] let a banned user evade by spoofing a fresh IP and let
+// an attacker forge distinct report reporter-keys from one machine.
 function clientIpOf(socket) {
   const xff = socket.handshake.headers["x-forwarded-for"];
-  if (xff) return String(xff).split(",")[0].trim();
+  if (xff) {
+    const parts = String(xff).split(",");
+    const real = parts[parts.length - 1].trim();
+    if (real) return real;
+  }
   return socket.handshake.address || "";
 }
 
 // ---------- Socket wiring ----------
 io.on("connection", (socket) => {
+  const ip = clientIpOf(socket);
+  // Connection-flood guard: refuse (without ever registering a conn, so the
+  // map can't be used to exhaust memory) once an IP is over the cap on this
+  // instance. We don't increment for a rejected socket, and its disconnect
+  // handler is never wired up, so the count stays balanced.
+  const liveForIp = (ipSocketCount.get(ip) || 0) + 1;
+  if (liveForIp > MAX_SOCKETS_PER_IP) {
+    socket.emit("connError", { message: "Too many connections." });
+    socket.disconnect(true);
+    return;
+  }
+  ipSocketCount.set(ip, liveForIp);
+
   conns.set(socket.id, {
     socket,
     player: null,
     status: "idle",
     matchId: null,
     buckets: {},
-    ip: clientIpOf(socket),
+    ip,
   });
 
   // Account required: authenticate the socket with our session token
@@ -2339,6 +2378,10 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     const c = conns.get(socket.id);
     if (!c) return;
+    // Release this socket's slot in the per-IP connection count.
+    const remaining = (ipSocketCount.get(c.ip) || 1) - 1;
+    if (remaining <= 0) ipSocketCount.delete(c.ip);
+    else ipSocketCount.set(c.ip, remaining);
     if (c.player?.id) clearPresence(c.player.id, socket.id);
     dequeue(socket.id);
     removeInvitesBy(socket.id);

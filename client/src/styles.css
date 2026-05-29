@@ -1623,7 +1623,12 @@ button.danger:hover:not(:disabled) {
    stacked; only the active one is opaque → true cross-fade, no remount. */
 .queue-figure {
   position: relative;
-  width: clamp(320px, 58vh, 520px);
+  /* Height-based sizing (58vh) keeps Mimiko a nice size on landscape/desktop,
+     but on a portrait phone a tall-narrow viewport makes 58vh resolve WIDER
+     than the screen — the figure then overflows the right edge and margin:auto
+     has no room to center it (looks shoved left). Cap the width at 92vw so it
+     always fits the viewport width and stays centered in every orientation. */
+  width: min(clamp(320px, 58vh, 520px), 92vw);
   aspect-ratio: 1920 / 1320;
   margin: 0 auto;
 }
