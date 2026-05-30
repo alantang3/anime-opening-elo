@@ -755,6 +755,10 @@ export default function App() {
       // Player + opponent badges.
       if (you) setMe(you);
       if (opp) setOpponent(opp);
+      // Re-establish the WebRTC polite/impolite role (lost on reload) so the
+      // post-resume renegotiation triggered by rtc:reset can't deadlock on
+      // simultaneous offers.
+      if (typeof data.polite === "boolean") politeRef.current = data.polite;
       // Skip the curtain entirely — the matchup screen / kitsune are
       // first-time-only ceremonies, not appropriate for a resume.
       setMatchStarting(false);
@@ -875,6 +879,10 @@ export default function App() {
     socket.on("banned", ({ untilMs } = {}) => setBanned({ untilMs: untilMs || 0 }));
 
     socket.on("rtc:signal", (payload) => onSignal(payload));
+    // Server asks both peers to rebuild the P2P media session after a match
+    // resume (one side reloaded, so the old connection is dead). See
+    // resetPeerConnection.
+    socket.on("rtc:reset", () => resetPeerConnection());
     socket.on("rtc:peerState", (s) => {
       const next = { cam: !!s.cam, mic: !!s.mic };
       peerAVRef.current = next;
@@ -1648,6 +1656,37 @@ export default function App() {
     setPeerAV({ cam: false, mic: false });
     peerAVRef.current = { cam: false, mic: false };
     setRemoteBlocked(false);
+  }
+
+  // Reconnect recovery: a page reload destroys the RTCPeerConnection entirely,
+  // and the peer that STAYED is left holding a dead one — so after a match
+  // resumes, neither side's media flows until the connection is rebuilt. The
+  // server emits "rtc:reset" to both sides; each closes its old peer connection
+  // and builds a fresh one. Unlike teardownRTC we KEEP our local mic/cam tracks
+  // (still live on the side that didn't reload) and re-attach them, so that
+  // side's audio/video auto-resumes. The reloaded side has no capture (the tab
+  // reload wiped it) and re-enables its own mic/cam, but can immediately
+  // RECEIVE the other side again.
+  function resetPeerConnection() {
+    try {
+      pcRef.current?.close();
+    } catch {}
+    pcRef.current = null;
+    audioSenderRef.current = null;
+    videoSenderRef.current = null;
+    remoteStreamRef.current = null;
+    pendingIceRef.current = [];
+    makingOfferRef.current = false;
+    ignoreOfferRef.current = false;
+    setHasRemote(false);
+    setRemoteBlocked(false);
+    ensurePeer(); // fresh pc + sendrecv transceivers → kicks renegotiation
+    // Re-attach whatever local media we still hold onto the new senders.
+    const ls = localStreamRef.current;
+    if (ls) {
+      audioSenderRef.current?.replaceTrack(ls.getAudioTracks()[0] || null);
+      videoSenderRef.current?.replaceTrack(ls.getVideoTracks()[0] || null);
+    }
   }
 
   const submitGuess = useCallback(() => {

@@ -1234,6 +1234,10 @@ function rebindAndResume(match, oldConn, newSocket) {
   // normally; they don't need to know we ever left.
   newSocket.emit("authed", { player: publicPlayer(oldConn.player) });
   newSocket.emit("match:resume", buildResumePayload(match, oldConn));
+  // The reconnector's RTCPeerConnection died with the old page, and the peer
+  // who stayed is holding a dead one. Tell BOTH to rebuild + renegotiate so
+  // camera/mic resume (game state already resumed above).
+  io.to(match.id).emit("rtc:reset");
 
   // If the match was waiting on this player to come back before tearing
   // down (e.g. opponent declined the rematch while we were gone), deliver
@@ -1275,6 +1279,9 @@ function rebindRemoteAndResume(match, oldConn, newSocketId, newInstance) {
   });
   oldConn.socket.emit("authed", { player: publicPlayer(oldConn.player) });
   oldConn.socket.emit("match:resume", buildResumePayload(match, oldConn));
+  // Rebuild the P2P media session on both sides after a cross-instance resume
+  // (see the same call in rebindAndResume).
+  io.to(match.id).emit("rtc:reset");
 
   if (match.pendingOpponentGone) {
     const reason = match.pendingOpponentGone;
@@ -1297,6 +1304,10 @@ function buildResumePayload(match, you) {
   return {
     state: match.state,
     you: publicPlayer(you.player),
+    // WebRTC perfect-negotiation tiebreaker, re-sent on resume because a
+    // reloaded client lost the value it got from matchFound. Same rule as
+    // createMatch: members[1] is the polite peer.
+    polite: match.members.indexOf(you) === 1,
     opponent: publicPlayer(opponent?.player),
     round: match.round,
     opening: match.opening
