@@ -491,7 +491,7 @@ const kPlayerIp = (playerId) => `playerip:${playerId}`;
 const kBan = (ip) => `ban:${ip}`;
 const kReporters = (ip) => `reporters:${ip}`;
 
-export const REPORTS_TO_BAN = 3; // distinct reporters needed
+export const REPORTS_TO_BAN = 5; // distinct reporters needed
 export const BAN_SECONDS = 7 * 24 * 60 * 60; // 1 week
 const PLAYER_IP_TTL_S = 24 * 60 * 60; // refreshed on the presence heartbeat
 // Reports decay on a rolling window so an IP isn't permanently 2/3-reported

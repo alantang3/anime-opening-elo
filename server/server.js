@@ -2345,7 +2345,7 @@ io.on("connection", (socket) => {
   });
 
   // Report the current opponent. The ban is by IP and needs REPORTS_TO_BAN
-  // (3) DISTINCT reporters, so one person can't ban anyone solo. Reasons are
+  // (5) DISTINCT reporters, so one person can't ban anyone solo. Reasons are
   // logged for the operator to review.
   socket.on("report", async ({ reason } = {}) => {
     const c = conns.get(socket.id);
