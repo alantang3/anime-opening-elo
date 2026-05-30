@@ -20,6 +20,14 @@ const K_FLOOR_MULT = 0.5; // even popular wins move Elo a lot
 // ranking up still takes net positive play and isn't a one-way ratchet.
 const LOSS_MULT = 0.8;
 
+// Forfeiting (the Forfeit button / Home-click mid-match) must cost MORE than
+// an honest loss — otherwise quitting a round you're losing is a way to CAP
+// the damage at less than playing it out. So the forfeiter's penalty uses this
+// multiplier, set ABOVE LOSS_MULT, making the outcome ordering for the loser
+// FORFEIT > LOSS > DRAW. Independent of the winner's reward (a voluntary
+// forfeit still gives the winner zero — see below).
+const FORFEIT_LOSS_MULT = 1.25;
+
 // Even when paired with someone far below you, you should not gain ZERO
 // Elo for a win — the queue is FIFO, you didn't choose the matchup. Floor
 // the winner's pre-rounding delta here so a +800 Elo gap still yields a
@@ -32,19 +40,19 @@ const MIN_WIN_DELTA = 5;
 const MIN_LOSS_DELTA = 2;
 
 // A win by opponent FORFEIT (voluntary leave OR disconnect) is worth this
-// fraction of a guessed win: you didn't actually name the opening, so the
-// reward (and the loser's proportional loss) is scaled down. Applied AFTER
-// the MIN_WIN_DELTA floor so a forfeit-win is strictly ≤ a guessed win at
-// every matchup.
+// fraction of a guessed win for the WINNER: you didn't actually name the
+// opening, so the reward is scaled down (≤ a guessed win at every matchup).
+// This now affects ONLY the winner's gain — the forfeiter's loss is governed
+// separately by FORFEIT_LOSS_MULT so quitting can cost MORE, not less.
 const FORFEIT_MULT = 0.5;
 
 // Draw multiplier — scales the same way LOSS and FORFEIT do (with k from
-// popularity and per-player expected score), but strictly smaller than
-// FORFEIT's effective multiplier (FORFEIT_MULT × LOSS_MULT = 0.4) so the
-// outcome ordering is ALWAYS LOSS > FORFEIT > DRAW regardless of
-// popularity or matchup. Both players take their own personal penalty:
-// a higher-Elo player loses more in a draw than a lower-Elo one,
-// because failing to ID an opening you "should have known" is worse.
+// popularity and per-player expected score), but strictly smaller than both
+// LOSS_MULT and FORFEIT_LOSS_MULT so the outcome ordering for the loser is
+// ALWAYS FORFEIT > LOSS > DRAW regardless of popularity or matchup. Both
+// players take their own personal penalty: a higher-Elo player loses more in a
+// draw than a lower-Elo one, because failing to ID an opening you "should have
+// known" is worse.
 const DRAW_MULT = 0.3;
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -78,16 +86,25 @@ export function resolveWin(winnerElo, loserElo, popFactor, opts = {}) {
   const { forfeit = false, voluntary = false } = opts;
   const k = effectiveK(popFactor);
   const expWin = expectedScore(winnerElo, loserElo);
-  let delta = Math.max(MIN_WIN_DELTA, k * (1 - expWin));
-  if (forfeit) delta *= FORFEIT_MULT;
+  const baseDelta = Math.max(MIN_WIN_DELTA, k * (1 - expWin));
+
+  // Winner's reward and loser's loss are now INDEPENDENT.
+  //
+  // Winner: a forfeit win is worth FORFEIT_MULT of a guessed win (you didn't
+  // name it), and a VOLUNTARY forfeit gives the winner ZERO — otherwise the
+  // meta becomes baiting opponents into leaving to farm their Elo.
+  let winnerGain = baseDelta;
+  if (forfeit) winnerGain *= FORFEIT_MULT;
+  if (voluntary) winnerGain = 0;
+
+  // Loser: forfeiting costs MORE than an honest loss (FORFEIT_LOSS_MULT >
+  // LOSS_MULT) so quitting a losing round isn't a way to cap the damage.
+  const lossMult = forfeit ? FORFEIT_LOSS_MULT : LOSS_MULT;
+  const loserLoss = Math.max(MIN_LOSS_DELTA, baseDelta * lossMult);
 
   // Whole-number ratings: round the resulting Elo, then derive the deltas
   // from the rounded values so what's shown ("+27") always equals the actual
   // change in the displayed rating.
-  const loserLoss = Math.max(MIN_LOSS_DELTA, delta * LOSS_MULT);
-  // Voluntary forfeit short-circuits the winner's gain to 0 — no farming
-  // by waiting people out. Loser's loss is untouched.
-  const winnerGain = voluntary ? 0 : delta;
   const winnerAfter = Math.round(winnerElo + winnerGain);
   const loserAfter = Math.round(floor(loserElo - loserLoss));
 
