@@ -85,7 +85,11 @@ export function resolveWin(winnerElo, loserElo, popFactor, opts = {}) {
   const { forfeit = false, voluntary = false } = opts;
   const k = effectiveK(popFactor);
   const expWin = expectedScore(winnerElo, loserElo);
-  const baseDelta = Math.max(MIN_WIN_DELTA, k * (1 - expWin));
+  // TEMPORARY: flat 100 Elo per win (loss/forfeit still derive from this via
+  // their multipliers, so loss = 10, forfeit = 125). To restore the
+  // popularity/skill-scaled system, revert this to:
+  //   const baseDelta = Math.max(MIN_WIN_DELTA, k * (1 - expWin));
+  const baseDelta = 100;
 
   // Winner's reward and loser's loss are now INDEPENDENT.
   //
