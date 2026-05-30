@@ -1709,18 +1709,13 @@ button.danger:hover:not(:disabled) {
 .found-overlay.lift { transform: translateY(-100%); }
 
 /* Midori lives in the LEFT GUTTER (between viewport edge and the .app
-   card, max-width 880px). Positioned VERTICALLY around the upper-middle
-   of the viewport where the battle square actually sits — not at viewport
-   center, which lands her down near the leaderboard. Width tied directly
-   to the gutter size with a guaranteed 40 px gap on each side, so she
+   card, max-width 880px). Vertically centered in the viewport. Width tied
+   directly to the gutter size with a guaranteed 40 px gap on each side, so she
    never touches the card or spills off-screen at any viewport width. */
 .side-midori {
   position: fixed;
-  /* Vertically aligned with where the battle stage typically lives in
-     the upper half of the viewport (not the dead center). On a 1080
-     viewport this lands around y≈300, comfortably within the battle area
-     and well above the leaderboard. */
-  top: clamp(180px, 28vh, 360px);
+  /* Vertically centered between the top and bottom of the viewport. */
+  top: 50%;
   /* Center of the left gutter horizontally. */
   left: calc((100vw - 880px) / 4);
   transform: translate(-50%, -50%);
