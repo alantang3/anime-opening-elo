@@ -1741,9 +1741,14 @@ button.danger:hover:not(:disabled) {
 @media (max-width: 1220px) {
   .side-midori { display: none; }
 }
+/* Keep the element's horizontal+vertical centring (translate(-50%, -50%))
+   throughout the fade — animating only translateY here would override it once
+   the animation's `both` fill mode locks in the end state, dropping the -50% X
+   centring and shoving Midori half her width to the RIGHT, onto the match box
+   on narrow screens. So carry the -50%, -50% in both keyframes. */
 @keyframes midoriFadeIn {
-  0%   { opacity: 0; transform: translateY(-6px); }
-  100% { opacity: 1; transform: translateY(0); }
+  0%   { opacity: 0; transform: translate(-50%, calc(-50% - 6px)); }
+  100% { opacity: 1; transform: translate(-50%, -50%); }
 }
 
 /* Yui flash on wrong guess — translucent full-screen overlay that fades
