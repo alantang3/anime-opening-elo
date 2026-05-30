@@ -79,6 +79,30 @@ if (!r2Enabled) {
 const EXTS = ["png", "jpg", "webp"];
 const PUBLIC_BASE = (R2_PUBLIC_BASE_URL || "").replace(/\/$/, "");
 
+// Content-sniff the uploaded bytes by their file signature (magic bytes) so we
+// store a real image, not whatever a client claimed in the data-URL MIME. SVG
+// and any other format simply don't match and are rejected — defense in depth
+// against an HTML/script payload smuggled behind an "image/png" label. Returns
+// the detected canonical ext ("png"/"jpg"/"webp") or null.
+function sniffImageExt(buf) {
+  if (!buf || buf.length < 12) return null;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
+  )
+    return "png";
+  // JPEG: starts FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "jpg";
+  // WEBP: "RIFF" .... "WEBP" (RIFF container tag at 0, format tag at 8)
+  if (
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  )
+    return "webp";
+  return null;
+}
+
 /**
  * Store an avatar image and return its absolute public URL (with a
  * cache-bust query so the browser refetches immediately on update).
@@ -90,6 +114,13 @@ const PUBLIC_BASE = (R2_PUBLIC_BASE_URL || "").replace(/\/$/, "");
 export async function putAvatar(playerId, ext, buf, contentType) {
   if (!EXTS.includes(ext))
     throw new Error(`unsupported avatar ext: ${ext}`);
+  // Reject anything whose actual bytes aren't a real PNG/JPEG/WEBP, OR whose
+  // bytes don't match the declared extension (e.g. a JPEG labelled image/png).
+  // The legit client encodes the file to a matching data URL, so a mismatch
+  // means a hand-crafted / spoofed upload.
+  const sniffed = sniffImageExt(buf);
+  if (!sniffed || sniffed !== ext)
+    throw new Error(`avatar bytes are not a valid ${ext} image`);
 
   if (r2Enabled) {
     // Clean up other extensions first. DeleteObject on a missing key is a
