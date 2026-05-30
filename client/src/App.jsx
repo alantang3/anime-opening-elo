@@ -52,6 +52,13 @@ if (import.meta.env.VITE_TURN_URL) {
 // Mic constraints: the browser usually enables these by default, but asking
 // explicitly is more consistent across devices and avoids echo/feedback when
 // someone plays the round audio out loud while their mic is hot.
+// Flip to false to silence the camera/mic + WebRTC trace logging once the
+// feature is confirmed working. Left ON for now so mic/cam problems are
+// diagnosable from the browser console instead of failing silently.
+const RTC_DEBUG = true;
+const rlog = (...a) => RTC_DEBUG && console.log("[rtc]", ...a);
+const rerr = (...a) => RTC_DEBUG && console.error("[rtc]", ...a);
+
 const MIC_CONSTRAINTS = {
   echoCancellation: true,
   noiseSuppression: true,
@@ -302,6 +309,10 @@ export default function App() {
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  // Dedicated, always-mounted sink for the opponent's AUDIO. Kept separate from
+  // remoteVideoRef because the video element is gated behind the camera UI and
+  // won't reliably play an audio-only stream — see playRemote.
+  const remoteAudioRef = useRef(null);
   const politeRef = useRef(false);
   const makingOfferRef = useRef(false);
   const ignoreOfferRef = useRef(false);
@@ -1342,6 +1353,9 @@ export default function App() {
     const lv = localVideoRef.current;
     if (lv && lv.srcObject !== localStreamRef.current)
       lv.srcObject = localStreamRef.current;
+    const ra = remoteAudioRef.current;
+    if (ra && remoteStreamRef.current && ra.srcObject !== remoteStreamRef.current)
+      ra.srcObject = remoteStreamRef.current;
     const rv = remoteVideoRef.current;
     if (rv && rv.srcObject !== remoteStreamRef.current) {
       rv.srcObject = remoteStreamRef.current;
@@ -1374,14 +1388,32 @@ export default function App() {
   // mic/cam toggle, and on tap-to-play; if it's still blocked while the peer
   // has a feed up, we surface a one-tap affordance.
   function playRemote() {
+    const stream = remoteStreamRef.current;
+    // The opponent's SOUND plays through a dedicated, always-mounted <audio>
+    // element — NOT the <video> element. The video element is gated behind the
+    // camera UI (camOn||micOn||hasRemote) and many browsers (esp. mobile) won't
+    // start an audio-only MediaStream playing inside a <video> until it also has
+    // a video track. That's the "mic is silent until a camera turns on" bug.
+    // So: keep the video element MUTED (picture only) and route audio here, so
+    // sound plays the instant the opponent's mic track arrives, camera or not.
     const rv = remoteVideoRef.current;
-    if (!rv) return;
-    rv.muted = false;
-    const p = rv.play();
+    if (rv) {
+      if (stream && rv.srcObject !== stream) rv.srcObject = stream;
+      rv.muted = true; // visuals only; audio comes from the <audio> sink below
+      rv.play?.().catch(() => {});
+    }
+    const ra = remoteAudioRef.current;
+    if (!ra) return;
+    if (stream && ra.srcObject !== stream) ra.srcObject = stream;
+    ra.muted = false;
+    const p = ra.play();
     if (p && p.catch)
       p.then(
         () => setRemoteBlocked(false),
         () => {
+          // Autoplay blocked while the opponent has a live feed → show the
+          // one-tap "hear opponent" affordance (tap calls playRemote again
+          // inside a user gesture, which the browser allows).
           const pav = peerAVRef.current;
           if (pav?.mic || pav?.cam) setRemoteBlocked(true);
         }
@@ -1424,7 +1456,17 @@ export default function App() {
       if (candidate) socketRef.current?.emit("rtc:signal", { candidate });
     };
     pc.ontrack = ({ track }) => {
+      rlog("ontrack: remote", track.kind, "track", {
+        enabled: track.enabled,
+        muted: track.muted,
+        readyState: track.readyState,
+      });
       remote.addTrack(track);
+      if (
+        remoteAudioRef.current &&
+        remoteAudioRef.current.srcObject !== remote
+      )
+        remoteAudioRef.current.srcObject = remote;
       if (
         remoteVideoRef.current &&
         remoteVideoRef.current.srcObject !== remote
@@ -1434,9 +1476,12 @@ export default function App() {
       playRemote();
     };
     pc.onconnectionstatechange = () => {
+      rlog("connectionState →", pc.connectionState);
       if (["failed", "closed", "disconnected"].includes(pc.connectionState))
         setHasRemote(false);
     };
+    pc.oniceconnectionstatechange = () =>
+      rlog("iceConnectionState →", pc.iceConnectionState);
     return pc;
   }
 
@@ -1487,6 +1532,14 @@ export default function App() {
   // damage to the other track. We keep one persistent local MediaStream as the
   // preview container and add/remove tracks in place.
   async function applyMedia(nextCam, nextMic) {
+    rlog("applyMedia requested", {
+      nextCam,
+      nextMic,
+      curCam: camOn,
+      curMic: micOn,
+      secureContext: window.isSecureContext,
+      hasMediaDevices: !!navigator.mediaDevices,
+    });
     ensurePeer();
     if (!localStreamRef.current) localStreamRef.current = new MediaStream();
     const ls = localStreamRef.current;
@@ -1500,14 +1553,23 @@ export default function App() {
     try {
       // --- MIC ---
       if (nextMic && !micOn) {
+        rlog("mic: requesting getUserMedia(audio)…");
         const s = await navigator.mediaDevices.getUserMedia({
           audio: MIC_CONSTRAINTS,
         });
         dropTracks("audio");
         const track = s.getAudioTracks()[0] || null;
+        rlog("mic: got audio track", {
+          label: track?.label,
+          enabled: track?.enabled,
+          muted: track?.muted,
+          readyState: track?.readyState,
+        });
         if (track) ls.addTrack(track);
         await audioSenderRef.current?.replaceTrack(track);
+        rlog("mic: replaceTrack done on audio sender", !!audioSenderRef.current);
       } else if (!nextMic && micOn) {
+        rlog("mic: turning OFF");
         dropTracks("audio");
         await audioSenderRef.current?.replaceTrack(null);
       }
@@ -1534,11 +1596,27 @@ export default function App() {
       const haveCam = ls.getVideoTracks().length > 0;
       setMicOn(haveMic);
       setCamOn(haveCam);
+      rlog("applyMedia done", {
+        haveMic,
+        haveCam,
+        senderTrack: audioSenderRef.current?.track?.kind || null,
+        signalingState: pcRef.current?.signalingState,
+        connectionState: pcRef.current?.connectionState,
+      });
       socketRef.current?.emit("rtc:state", { cam: haveCam, mic: haveMic });
       playRemote(); // this toggle is a user gesture — good moment to unblock
     } catch (e) {
       // Only the device we were turning ON failed; the other stays intact.
-      setNotice("Couldn't access camera/mic (permission denied?).");
+      // Log the REAL error — this was silently swallowed before, which is why
+      // a failed mic/cam grab left the console empty and undiagnosable.
+      // Common e.name values: NotAllowedError (permission denied/dismissed),
+      // NotFoundError (no device), NotReadableError (device in use by another
+      // app), SecurityError (page not served over HTTPS).
+      rerr("applyMedia failed:", e?.name, e?.message, e);
+      setNotice(
+        `Couldn't access camera/mic: ${e?.name || "error"}` +
+          (e?.name === "NotAllowedError" ? " (permission denied)" : "")
+      );
       setMicOn(ls.getAudioTracks().length > 0);
       setCamOn(ls.getVideoTracks().length > 0);
     }
@@ -1561,6 +1639,7 @@ export default function App() {
     pendingIceRef.current = [];
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
     makingOfferRef.current = false;
     ignoreOfferRef.current = false;
     setCamOn(false);
@@ -1737,6 +1816,10 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* Opponent audio sink — always mounted (independent of the camera UI)
+          so remote sound plays the moment a mic track arrives, with or without
+          video. See playRemote for why this is separate from the <video>. */}
+      <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: "none" }} />
       <div className="header">
         <div
           className="title-wrap"
