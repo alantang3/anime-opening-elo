@@ -15,10 +15,9 @@ import { ELO_FLOOR } from "./db.js";
 export const K_BASE = 100;
 const K_FLOOR_MULT = 0.5; // even popular wins move Elo a lot
 
-// Wins are worth more than losses cost (non-zero-sum), but the gap is
-// modest — at 0.8 the loser drops most of what the winner gained, so
-// ranking up still takes net positive play and isn't a one-way ratchet.
-const LOSS_MULT = 0.8;
+// Strongly non-zero-sum: the loser drops only 10% of what the winner gains,
+// so a normal loss barely dents your rating and ranking up is forgiving.
+const LOSS_MULT = 0.1;
 
 // Forfeiting (the Forfeit button / Home-click mid-match) must cost MORE than
 // an honest loss — otherwise quitting a round you're losing is a way to CAP
